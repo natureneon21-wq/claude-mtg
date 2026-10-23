@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.5.1-d6b26a">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.5.2-d6b26a">
   <img alt="Platform" src="https://img.shields.io/badge/platform-PWA%20%C2%B7%20Android%20%C2%B7%20iOS-3e8ed6">
   <img alt="No build step" src="https://img.shields.io/badge/build-none%20(vanilla%20JS)-2f9e5a">
   <img alt="Status" src="https://img.shields.io/badge/status-prototype-e0563f">

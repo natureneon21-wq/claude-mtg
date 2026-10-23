@@ -2,6 +2,11 @@
 
 All notable changes to Manaforge are documented here.
 
+## [0.5.2] – 2026-10-23
+### Changed
+- Mushroom Forest theme redesigned from a hand sketch: a tree canopy arching in from both top corners with leaves that sway individually in the wind, tree trunks along both screen edges (behind the content), hanging moss, a curling ivy tendril, glowing bracket fungi with a tiny nodding mushroom character, fairies flying small loops, and a forest floor with roots and mushroom clusters whose caps rock in the wind
+- The camera button area stays free of decorations
+
 ## [0.5.1] – 2026-10-23
 ### Added
 - Animated edge details in every theme: swaying mushrooms and ferns, a nodding and blinking mushroom character and a head-tilting owl (Mushroom Forest), fluttering fairies, flapping bats, clattering skulls, flickering flames, swimming fish, curling tentacles, spinning gears and runes, waving banners, pulsing cells and more
