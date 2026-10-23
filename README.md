@@ -15,6 +15,7 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-PWA%20%C2%B7%20Android%20%C2%B7%20iOS-3e8ed6">
   <img alt="No build step" src="https://img.shields.io/badge/build-none%20(vanilla%20JS)-2f9e5a">
   <img alt="Status" src="https://img.shields.io/badge/status-prototype-e0563f">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-a59cb5"></a>
 </p>
 
 ---
@@ -126,6 +127,7 @@ manaforge-v0.1.0_1/        the deployed app (served via GitHub Pages)
 └── icons/                 app icons
 docs/                      images used in this README
 CHANGELOG.md               version history
+LICENSE                    MIT license
 ```
 
 ## Local development
@@ -152,6 +154,10 @@ The camera scanner and installation require HTTPS (or `localhost`).
 - Card data and images: [Scryfall](https://scryfall.com) – card art © the respective artists and Wizards of the Coast
 - OCR: [Tesseract.js](https://github.com/naptha/tesseract.js)
 - Developed as an AI-assisted development experiment together with Claude (Anthropic)
+
+## License
+
+The source code is released under the [MIT License](LICENSE). Card data, card images and card art are not covered by this license – they belong to their respective owners (see below).
 
 ## Legal
 
