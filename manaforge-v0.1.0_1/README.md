@@ -1,47 +1,21 @@
-# Manaforge – Prototyp v0.5.0
+# Manaforge – app folder
 
-PWA zum Import von ManaBox-CSV-Exporten und zum Deckbau aus der eigenen Sammlung.
+This folder contains the deployed Manaforge Progressive Web App (version 0.5.0), served via GitHub Pages:
 
-## Installation aufs Handy (GitHub Pages, kostenlos)
-1. Neues öffentliches Repo auf github.com anlegen (z. B. `manaforge`).
-2. Alle Dateien aus diesem Ordner hochladen („Add file → Upload files“).
-3. Settings → Pages → Branch `main`, Ordner `/ (root)` → Save.
-4. Nach ca. 1 Minute läuft die App unter `https://<name>.github.io/manaforge/`.
-5. Auf dem S26 in Chrome öffnen → Menü ⋮ → „Zum Startbildschirm hinzufügen“ / „App installieren“.
+**https://natureneon21-wq.github.io/claude-mtg/manaforge-v0.1.0_1/**
 
-Updates: geänderte Dateien ins Repo hochladen; die App lädt beim nächsten Öffnen die neue Version.
+| File | Purpose |
+|---|---|
+| `index.html` | Markup, styles and the 16 themes |
+| `app.js` | Application logic: import, Scryfall, scanner, deck builder, Gemini, UI |
+| `sw.js` | Service worker for offline use and updates |
+| `manifest.webmanifest` | PWA manifest (name, icons, colours) |
+| `icons/` | App icons |
 
-## Dateien
-- `index.html` – Oberfläche & Styles
-- `app.js` – Logik (CSV-Import, Scryfall, Deckbau-Algorithmus, Gemini)
-- `sw.js`, `manifest.webmanifest`, `icons/` – Installierbarkeit & Offline
+> The folder name is kept for compatibility: renaming it would change the app URL and break existing installations.
 
-Daten: Scryfall API (Kartendaten/Bilder), optional Gemini API (eigener Key aus Google AI Studio).
+See the [main README](../README.md) for features, installation and documentation, and the [changelog](../CHANGELOG.md) for the version history.
 
-## Neu in v0.5.0
-- 16 Designs (Einstellungen → Design): 6 einfarbige + 10 Gilden-Designs, jeweils mit eigener Schrift, Textur, Rand-Dekoration (nach innen ausfadend) und Hintergrund-Animation
-- Kartenkunst im Hintergrund: passendes Artwork aus der eigenen Sammlung (sonst Scryfall), mit Künstler-Credit
-- Decks öffnen automatisch im Design ihrer Farben (ein- und zweifarbig) mit dem Artwork der stärksten Karte
-- Hintergrund-Animationen abschaltbar
+## Deploying an update
 
-## Neu in v0.4.0
-- iPhone: Vollbild-Ansichten (Scanner, Deck) wurden oben abgeschnitten – behoben; Safe-Area für Notch/Dynamic Island; Einstellung „Bedienknöpfe unten“
-- Kartenwert mit wählbarer Preisquelle: Cardmarket (€), TCGplayer ($), Cardhoarder (tix) oder eigener Kaufpreis aus ManaBox; Foil-Preise; Shop-Link pro Karte; Deckwert; Preise wöchentlich automatisch aktualisiert
-- Digitale Ordner (🎮 MTG Arena): getrennt von physischer Sammlung, Wert und Deckbau; Arena-Formate Historic, Timeless, Explorer, Alchemy
-- „Liste einfügen“: Decklisten/Exporte aus MTG Arena, Moxfield, Archidekt, MTGO in einen Ordner importieren
-- CSV-Import wahlweise in einen bestimmten Ordner
-
-## Neu in v0.3.0
-- Eigener Kartenscanner (📷 in der Sammlung): Texterkennung auf dem Gerät liest Sammlernummer, Set-Code, Sprache und Namen; Abgleich mit Scryfall; Gemini-Foto-Erkennung als Fallback
-- Dauerscan mit Vibration, Rückgängig, „+1 Nochmal“, Ziel-Ordner, Foil-Schalter, Set festlegen, manuelle Suche
-- Texterkennung (Tesseract.js, ca. 7 MB) wird beim ersten Scan einmalig von jsDelivr geladen und dann gecacht
-
-## Neu in v0.2.0
-- Backup: Sammlung, Ordner, Decks & Einstellungen als JSON sichern/teilen und wiederherstellen
-- Ordner (eigene + automatisch aus ManaBox-Bindern), Set-Ansicht, Mehrfachauswahl
-- Kartenansicht: durch Karten wischen, Anzahl ändern, Exemplare in Ordner verschieben
-- Kartensprache: Wie gescannt / Deutsch / Englisch
-- Deckbau nur aus ausgewählten Ordnern
-
-## Update einspielen
-Im Repo in den App-Ordner gehen → „Add file“ → „Upload files“ → `index.html`, `app.js`, `sw.js` (und `README.md`) hineinziehen → „Commit changes“. Gleichnamige Dateien werden überschrieben.
+Upload the changed files (usually `index.html`, `app.js` and `sw.js`) to this folder and commit to `main`. GitHub Pages redeploys within about a minute; installed apps pick up the new version the next time they are opened online.
