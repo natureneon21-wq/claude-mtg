@@ -1,6 +1,6 @@
 'use strict';
 /* Manaforge – MTG-Sammlung & Deckbau (Prototyp) */
-const APP_VERSION = '0.3.0';
+const APP_VERSION = '0.4.0';
 
 /* ============================================================
    Hilfsfunktionen
@@ -105,7 +105,7 @@ const DB = {
 };
 
 const Settings = {
-  defaults: { geminiKey: '', geminiModel: 'gemini-flash-latest', unlimitedBasics: true, limitedMaxCopies: 4, cardLang: 'scanned', lastBackup: 0 },
+  defaults: { geminiKey: '', geminiModel: 'gemini-flash-latest', unlimitedBasics: true, limitedMaxCopies: 4, cardLang: 'scanned', lastBackup: 0, priceSource: 'cardmarket', lastCardRefresh: 0, controlsBottom: false },
   data: {},
   load() {
     try { this.data = { ...this.defaults, ...JSON.parse(localStorage.getItem('manaforge-settings') || '{}') }; }
@@ -179,6 +179,8 @@ const COLS = {
   lang: ['language', 'lang', 'sprache'],
   cond: ['condition', 'zustand'],
   binder: ['bindername', 'binder', 'folder', 'ordner', 'listname', 'list'],
+  buy: ['purchaseprice', 'kaufpreis', 'buyprice'],
+  buyCur: ['purchasepricecurrency', 'purchasecurrency', 'currency', 'waehrung'],
 };
 
 function parseManaBox(text) {
@@ -206,6 +208,7 @@ function parseManaBox(text) {
       set: set.toLowerCase(), setName: get('setName'), number: get('number'),
       foil, qty: Number.isFinite(qty) && qty > 0 ? qty : 1, lang: normLang(get('lang')), cond: get('cond'),
       binder: get('binder'), folder: null,
+      buy: parseFloat(get('buy').replace(',', '.')) || 0, buyCur: get('buyCur').toUpperCase(),
     };
     e.key = entryKey(e) + '|b:' + e.binder.toLowerCase();
     const ex = map.get(e.key);
@@ -217,7 +220,7 @@ function parseManaBox(text) {
 /* ============================================================
    Scryfall
    ============================================================ */
-const LEG_KEYS = ['standard', 'pioneer', 'modern', 'pauper', 'legacy', 'vintage', 'commander'];
+const LEG_KEYS = ['standard', 'pioneer', 'modern', 'pauper', 'legacy', 'vintage', 'commander', 'historic', 'timeless', 'explorer', 'alchemy'];
 function slimCard(c) {
   const faces = c.card_faces || [];
   const f0 = faces[0] || {};
@@ -238,6 +241,9 @@ function slimCard(c) {
     rank: c.edhrec_rank || null, img: img.normal || '', imgS: img.small || '',
     imgBack: faces[1]?.image_uris?.normal || '', eur: c.prices?.eur || c.prices?.eur_foil || null,
     usd: c.prices?.usd || c.prices?.usd_foil || null, layout: c.layout,
+    prices: { eur: c.prices?.eur || null, eur_foil: c.prices?.eur_foil || null, usd: c.prices?.usd || null, usd_foil: c.prices?.usd_foil || null, usd_etched: c.prices?.usd_etched || null, tix: c.prices?.tix || null },
+    shop: { cardmarket: c.purchase_uris?.cardmarket || '', tcgplayer: c.purchase_uris?.tcgplayer || '', cardhoarder: c.purchase_uris?.cardhoarder || '' },
+    games: c.games || [],
   };
 }
 
@@ -442,7 +448,13 @@ const FORMATS = {
   modern: { label: 'Modern', size: 60, max: 4, legal: 'modern', lands: { aggro: 20, midrange: 23, control: 25 } },
   pauper: { label: 'Pauper', size: 60, max: 4, legal: 'pauper', lands: { aggro: 19, midrange: 22, control: 24 } },
   limited40: { label: 'Limited 40', size: 40, max: null, legal: null, limited: true, lands: { aggro: 16, midrange: 17, control: 17 } },
+  historic: { label: 'Historic', size: 60, max: 4, legal: 'historic', arena: true, lands: { aggro: 21, midrange: 24, control: 26 } },
+  timeless: { label: 'Timeless', size: 60, max: 4, legal: 'timeless', arena: true, lands: { aggro: 20, midrange: 23, control: 25 } },
+  explorer: { label: 'Explorer', size: 60, max: 4, legal: 'explorer', arena: true, lands: { aggro: 21, midrange: 24, control: 26 } },
+  alchemy: { label: 'Alchemy', size: 60, max: 4, legal: 'alchemy', arena: true, lands: { aggro: 22, midrange: 24, control: 26 } },
 };
+/** Deckbau ausschließlich aus digitalen Ordnern? */
+const isArenaBuild = () => state.build.folders.length > 0 && state.build.folders.every(id => isDigitalFolder(id));
 const maxCopies = (F) => F.max ?? (+Settings.get('limitedMaxCopies') || 99);
 const CURVE = { // Anteile der Zauber je Manawert 1,2,3,4,5,6+
   aggro: [0.2, 0.36, 0.26, 0.12, 0.06, 0],
@@ -455,9 +467,10 @@ const bucketOf = (cmc) => Math.max(0, Math.min(5, Math.round(cmc) - 1));
 /** Fasst die Sammlung nach Kartennamen zusammen */
 function buildPool(folders = state.build.folders) {
   const fset = folders && folders.length ? new Set(folders) : null;
+  const dig = digitalIds();
   const pool = new Map();
   for (const e of state.collection) {
-    if (fset && !fset.has(e.folder || '_none')) continue;
+    if (fset ? !fset.has(e.folder || '_none') : dig.has(e.folder)) continue;
     const c = e.sid && state.cards.get(e.sid);
     if (!c) continue;
     let p = pool.get(c.name);
@@ -585,7 +598,7 @@ function buildDeck({ format, colors, arch, pool, forced = [] }) {
   let rest = need - alloc.reduce((s, a) => s + a.n, 0);
   alloc.sort((a, b) => (b.x - b.n) - (a.x - a.n)).forEach(a => { if (rest > 0) { a.n++; rest--; } });
   const missing = [];
-  const unlimited = Settings.get('unlimitedBasics');
+  const unlimited = Settings.get('unlimitedBasics') || isArenaBuild();
   for (const a of alloc) {
     if (a.n <= 0) continue;
     let n = a.n;
@@ -649,7 +662,7 @@ function suggestDecks({ format, colorMode, colors, arch, forced }) {
       const d = buildDeck({ format, colors: cs, arch: a, pool, forced: forced ? [forced] : [] });
       if (!best || d.raw > best.raw) best = d;
     }
-    if (best) { best.folders = (state.build.folders || []).slice(); out.push(best); }
+    if (best) { best.folders = (state.build.folders || []).slice(); best.digital = isArenaBuild(); out.push(best); }
   }
   return out.sort((a, b) => b.raw - a.raw);
 }
@@ -735,6 +748,7 @@ ${cands.map(p => cardLine(p, maxC)).join('\n')}`;
   const r = await geminiCall(prompt, true);
   const deck = validateAIDeck(r, { format, colors, arch: archUse, pool });
   deck.folders = (state.build.folders || []).slice();
+  deck.digital = isArenaBuild();
   return deck;
 }
 
@@ -831,7 +845,7 @@ Maximal 6 Tauschvorschläge. Die Deckgröße muss gleich bleiben.`;
 const sheets = [];
 function openSheet(html, { full = false, onClose } = {}) {
   const back = document.createElement('div');
-  back.className = 'sheet-back';
+  back.className = 'sheet-back' + (full ? ' full-back' : '');
   back.innerHTML = `<div class="sheet ${full ? 'full' : ''}">${full ? '' : '<div class="grab"></div>'}<div class="sbody">${html}</div></div>`;
   back.addEventListener('click', e => { if (e.target === back) closeSheet(); });
   document.body.appendChild(back);
@@ -853,7 +867,7 @@ const spinnerHTML = (t, sub = '') => `<div class="spinner"></div><h3>${esc(t)}</
 
 function render() {
   $$('#nav button').forEach(b => b.classList.toggle('active', b.dataset.view === state.view));
-  const total = state.collection.reduce((s, e) => s + e.qty, 0);
+  const total = physical().reduce((s, e) => s + e.qty, 0);
   $('#hdrInfo').textContent = total ? `${total} Karten` : '';
   ({ collection: renderCollection, build: renderBuild, decks: renderDecks, settings: renderSettings })[state.view]();
 }
@@ -895,7 +909,8 @@ function view(c, lang) {
   if (lang === 'en') {
     return { name: c.name, type: c.type, text: c.text, img: l?.img || c.img, imgBack: l?.imgBack || c.imgBack, lang: 'en' };
   }
-  if (!l || l.missing) return own;
+  if (!l) return { ...own, pending: lang };
+  if (l.missing) return { ...own, fallback: lang };
   return { name: l.name || c.name, type: l.type || c.type, text: l.text || c.text, img: l.img || c.img, imgBack: l.imgBack || c.imgBack, lang };
 }
 const displayName = (c, entries, fallback = '') => view(c, targetLang(entries))?.name || c?.name || fallback;
@@ -963,7 +978,7 @@ async function runLocQueue() {
 document.addEventListener('loc', (ev) => {
   $$('.tile[data-oid]').forEach(t => {
     if (!ev.detail.has(t.dataset.oid)) return;
-    const x = grouped().find(g => g.name === t.dataset.card);
+    const x = cardGroup(t.dataset.card);
     const v = x && view(x.card, targetLang(x.entries));
     const img = t.querySelector('img');
     if (v && img && v.img && img.getAttribute('src') !== v.img) img.src = v.img;
@@ -1022,7 +1037,7 @@ function folderPicker(title, cb, { qtyMax = 0 } = {}) {
   const body = openSheet(`<h2>${esc(title)}</h2>
     ${qtyMax > 1 ? `<div class="row" style="margin:10px 0"><span class="grow muted">Anzahl</span><button class="qbtn" data-qd="-1">−</button><b id="pq" style="width:30px;text-align:center">${qty}</b><button class="qbtn" data-qd="1">+</button></div>` : ''}
     <div class="row" style="margin:10px 0"><input type="text" id="nf" placeholder="Neuer Ordner, z. B. Avatar" class="grow"><button class="btn sm" id="nfb">Anlegen</button></div>
-    ${state.folders.slice().sort((a, b) => a.name.localeCompare(b.name)).map(f => `<div class="frow" data-pick="${f.id}"><span class="ficon">📁</span><span class="grow">${esc(f.name)}</span></div>`).join('')}
+    ${state.folders.slice().sort((a, b) => a.name.localeCompare(b.name)).map(f => `<div class="frow" data-pick="${f.id}"><span class="ficon">${f.digital ? '🎮' : '📁'}</span><span class="grow">${esc(f.name)}${f.digital ? ' <span class="tiny muted">MTG Arena</span>' : ''}</span></div>`).join('')}
     <div class="frow" data-pick=""><span class="ficon">🗂</span><span class="grow muted">Ohne Ordner</span></div>`);
   const done = (id) => { closeSheet(); setTimeout(() => cb(id, qty), 30); };
   body.querySelectorAll('[data-pick]').forEach(r => r.onclick = () => done(r.dataset.pick || null));
@@ -1037,12 +1052,15 @@ function openFolderMenu(id) {
   const n = state.collection.filter(e => e.folder === id).reduce((s, e) => s + e.qty, 0);
   const body = openSheet(`<h2>Ordner bearbeiten</h2>
     <label class="field"><span>Name</span><input type="text" id="fn" value="${esc(f.name)}"></label>
+    <div class="toggle"><div><b>🎮 Digitaler Ordner (MTG Arena)</b><div class="small muted">Getrennt von physischer Sammlung, Wert und normalem Deckbau</div></div><label class="switch"><input type="checkbox" id="fdig" ${f.digital ? 'checked' : ''}><span></span></label></div>
     <button class="btn primary block" id="fsave">Speichern</button>
     <button class="btn danger block" style="margin-top:10px" id="fdel">Ordner löschen</button>
     <p class="tiny muted">Die ${n} Karten darin bleiben in deiner Sammlung und landen in „Ohne Ordner“.</p>`);
   body.querySelector('#fsave').onclick = async () => {
     const v = body.querySelector('#fn').value.trim(); if (!v) return;
-    f.name = v; await DB.putMany('folders', [f]); closeSheet(); render();
+    f.name = v; f.digital = body.querySelector('#fdig').checked;
+    state.grouped = null; state.build.folders = state.build.folders.filter(id => state.folders.some(x => x.id === id));
+    await DB.putMany('folders', [f]); closeSheet(); render();
   };
   body.querySelector('#fdel').onclick = async (e) => {
     const b = e.target;
@@ -1053,6 +1071,101 @@ function openFolderMenu(id) {
     state.build.folders = state.build.folders.filter(x => x !== id);
     if (state.filter.folder === id) state.filter.folder = null;
     closeSheet(); toast('Ordner gelöscht'); render();
+  };
+}
+
+/* ============================================================
+   Preise & digitale Ordner (MTG Arena)
+   ============================================================ */
+const PRICE_SRC = {
+  cardmarket: { label: 'Cardmarket', cur: '€', hint: 'Trendpreis in Euro' },
+  tcgplayer: { label: 'TCGplayer', cur: '$', hint: 'Marktpreis in US-Dollar' },
+  cardhoarder: { label: 'Cardhoarder', cur: 'tix', hint: 'MTGO-Tickets' },
+  purchase: { label: 'Mein Kaufpreis', cur: '', hint: 'Kaufpreis aus dem ManaBox-Export' },
+};
+const priceSrc = () => PRICE_SRC[Settings.get('priceSource')] ? Settings.get('priceSource') : 'cardmarket';
+/** Stückpreis eines Exemplars nach gewählter Quelle (Foil beachtet) */
+function unitPrice(e, c) {
+  const src = priceSrc();
+  if (src === 'purchase') return +e.buy || 0;
+  const p = c?.prices || { eur: c?.eur, usd: c?.usd };
+  const pick = (...ks) => { for (const k of ks) { const v = parseFloat(p[k]); if (v) return v; } return 0; };
+  if (src === 'tcgplayer') return e.foil ? pick('usd_foil', 'usd_etched', 'usd') : pick('usd', 'usd_foil', 'usd_etched');
+  if (src === 'cardhoarder') return pick('tix');
+  return e.foil ? pick('eur_foil', 'eur') : pick('eur', 'eur_foil');
+}
+function purchaseCur() {
+  const c = state.collection.find(e => e.buyCur)?.buyCur || 'EUR';
+  return { EUR: '€', USD: '$', GBP: '£', CHF: 'CHF' }[c] || c;
+}
+function fmtMoney(v, exact = false) {
+  if (!v) return '–';
+  const src = priceSrc();
+  const cur = src === 'purchase' ? purchaseCur() : PRICE_SRC[src].cur;
+  const n = !exact && v >= 100 ? Math.round(v).toLocaleString('de-DE') : v.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return cur === '$' ? `$${n}` : `${n} ${cur}`;
+}
+const entriesValue = (es) => es.reduce((s, e) => s + (isDigital(e) ? 0 : unitPrice(e, state.cards.get(e.sid)) * e.qty), 0);
+
+const digitalIds = () => new Set(state.folders.filter(f => f.digital).map(f => f.id));
+const isDigitalFolder = (id) => !!id && !!state.folders.find(f => f.id === id)?.digital;
+const isDigital = (e) => isDigitalFolder(e.folder);
+/** Physische Sammlung (ohne digitale Ordner) */
+function physical() { const d = digitalIds(); return d.size ? state.collection.filter(e => !d.has(e.folder)) : state.collection; }
+const nameOf = (e) => state.cards.get(e.sid)?.name || e.name;
+/** Alle Exemplare einer Karte (physisch und digital) */
+function cardGroup(name) { return groupEntries(state.collection.filter(e => nameOf(e) === name))[0]; }
+/** Bestand, gegen den ein Deck geprüft wird: digitale Decks → ihre Ordner, sonst physische Sammlung */
+function ownedGroups(deck) {
+  if (deck?.digital) return groupEntries(state.collection.filter(e => (deck.folders || []).includes(e.folder || '_none')));
+  return grouped();
+}
+
+/** Kartendaten (v. a. Preise) für die ganze Sammlung neu laden – Scryfall aktualisiert Preise täglich */
+async function refreshAllCards(onProgress) {
+  const ids = [...new Set(state.collection.map(e => e.sid).filter(Boolean))];
+  for (let i = 0; i < ids.length; i += 75) {
+    const data = await scryCollection(ids.slice(i, i + 75).map(id => ({ id })));
+    const fresh = (data.data || []).map(slimCard);
+    fresh.forEach(c => { state.cards.set(c.id, c); anCache.delete(c.id); });
+    await DB.putMany('cards', fresh);
+    onProgress && onProgress(Math.min(i + 75, ids.length), ids.length);
+    await sleep(110);
+  }
+  Settings.set('lastCardRefresh', Date.now());
+  state.grouped = null;
+}
+
+/** Textliste importieren: „4 Lightning Bolt (M10) 146“ (MTG Arena, Moxfield, MTGO …) */
+function parseList(text) {
+  const out = new Map();
+  for (let line of text.split(/\r?\n/)) {
+    line = line.trim();
+    if (!line || /^(deck|sideboard|commander|companion|maybeboard|about|name\b|\/\/)/i.test(line)) continue;
+    const m = line.match(/^(\d+)\s*x?\s+(.+?)(?:\s+\(([A-Za-z0-9]{2,6})\)(?:\s+([\w\-★*]+))?)?(?:\s+\*F\*)?\s*$/);
+    if (!m) continue;
+    const ARENA_SET = { dar: 'dom', conf: 'con' };   // Arena-Kürzel, die von Scryfall abweichen
+    const sc = (m[3] || '').toLowerCase();
+    const e = { name: m[2].trim(), sid: '', set: ARENA_SET[sc] || sc, setName: '', number: m[4] || '', foil: /\*F\*/.test(line), qty: +m[1], lang: '', cond: '', binder: '', folder: null, buy: 0, buyCur: '' };
+    const k = `${e.name.toLowerCase()}|${e.set}|${e.number}|${e.foil}`;
+    const x = out.get(k); if (x) x.qty += e.qty; else out.set(k, e);
+  }
+  return [...out.values()];
+}
+function openListImport(defaultFolder = null) {
+  let folder = defaultFolder;
+  const body = openSheet(`<h2>Liste einfügen</h2>
+    <p class="small muted">Eine Karte pro Zeile, z. B. <code>4 Lightning Bolt (M10) 146</code> oder <code>2 Counterspell</code>. Passt zum Export aus MTG Arena, Moxfield, Archidekt oder MTGO.</p>
+    <textarea id="ltext" rows="9" placeholder="4 Lightning Bolt (M10) 146&#10;2 Counterspell"></textarea>
+    <div class="row" style="margin:10px 0"><span class="grow small muted">Ziel</span><button class="fchip on" id="lfolder">📁 ${esc(folderName(folder))}</button></div>
+    <button class="btn primary block" id="lok">Importieren</button>`);
+  body.querySelector('#lfolder').onclick = () => folderPicker('Liste importieren in', (id) => { folder = id; body.querySelector('#lfolder').textContent = (isDigitalFolder(id) ? '🎮 ' : '📁 ') + folderName(id); });
+  body.querySelector('#lok').onclick = async () => {
+    const entries = parseList(body.querySelector('#ltext').value);
+    if (!entries.length) { toast('Keine Kartenzeilen erkannt.'); return; }
+    entries.forEach(e => { e.folder = folder || null; });
+    closeSheet();
+    await doImport(entries, 'merge');
   };
 }
 
@@ -1071,12 +1184,12 @@ function groupEntries(entries) {
   }
   return [...g.values()];
 }
-function grouped() { return state.grouped || (state.grouped = groupEntries(state.collection)); }
+function grouped() { return state.grouped || (state.grouped = groupEntries(physical())); }
 
 function scopeEntries() {
   const f = state.filter;
-  if (f.folder == null && f.set == null) return state.collection;
-  return state.collection.filter(e =>
+  if (f.folder == null && f.set == null) return physical();
+  return (f.folder == null ? physical() : state.collection).filter(e =>
     (f.folder == null || (f.folder === '_none' ? !e.folder : e.folder === f.folder)) &&
     (f.set == null || (state.cards.get(e.sid)?.set || e.set) === f.set));
 }
@@ -1099,7 +1212,7 @@ function filteredCollection() {
     if (f.type && (!c || !new RegExp(f.type).test(c.type))) return false;
     return true;
   });
-  const price = (x) => parseFloat(x.card?.eur || 0) * x.qty;
+  const price = (x) => entriesValue(x.entries);
   const sorters = {
     name: (a, b) => displayName(a.card, a.entries, a.name).localeCompare(displayName(b.card, b.entries, b.name)) || a.name.localeCompare(b.name),
     cmc: (a, b) => (a.card?.cmc ?? 99) - (b.card?.cmc ?? 99) || a.name.localeCompare(b.name),
@@ -1153,9 +1266,16 @@ function renderCollection() {
   }));
   $$('[data-setcode]').forEach(r => r.onclick = () => { f.set = r.dataset.setcode; f.limit = 150; render(); window.scrollTo(0, 0); });
   $('#newFolder')?.addEventListener('click', () => {
-    const body = openSheet(`<h2>Neuer Ordner</h2><label class="field"><span>Name</span><input type="text" id="fn" placeholder="z. B. Avatar, Hobbit, Commander-Staples"></label><button class="btn primary block" id="fok">Anlegen</button>`);
+    const body = openSheet(`<h2>Neuer Ordner</h2><label class="field"><span>Name</span><input type="text" id="fn" placeholder="z. B. Avatar, Hobbit, MTG Arena"></label>
+      <div class="toggle"><div><b>🎮 Digitaler Ordner (MTG Arena)</b><div class="small muted">Zählt nicht zur physischen Sammlung, zum Wert und zum normalen Deckbau</div></div><label class="switch"><input type="checkbox" id="fdig"><span></span></label></div>
+      <button class="btn primary block" id="fok">Anlegen</button>`);
     const inp = body.querySelector('#fn'); setTimeout(() => inp.focus(), 100);
-    body.querySelector('#fok').onclick = async () => { if (await createFolder(inp.value)) { closeSheet(); render(); } };
+    body.querySelector('#fok').onclick = async () => {
+      const f = await createFolder(inp.value);
+      if (!f) return;
+      if (body.querySelector('#fdig').checked && !f.digital) { f.digital = true; await DB.putMany('folders', [f]); state.grouped = null; }
+      closeSheet(); render();
+    };
   });
 }
 
@@ -1165,10 +1285,11 @@ function thumbs(entries, n = 3) {
 }
 
 function folderListHTML() {
-  const rows = state.folders.slice().sort((a, b) => a.name.localeCompare(b.name)).map(fo => {
+  const rows = state.folders.slice().sort((a, b) => (a.digital ? 1 : 0) - (b.digital ? 1 : 0) || a.name.localeCompare(b.name)).map(fo => {
     const es = state.collection.filter(e => e.folder === fo.id);
-    return `<div class="sugg" data-folder="${fo.id}" style="--stripe:var(--gold)">${thumbs(es)}
-      <div class="grow"><h3>📁 ${esc(fo.name)}</h3><div class="small muted">${es.reduce((s, e) => s + e.qty, 0)} Karten · ${groupEntries(es).length} verschiedene</div></div>
+    const val = fo.digital ? 0 : entriesValue(es);
+    return `<div class="sugg" data-folder="${fo.id}" style="--stripe:${fo.digital ? '#6c8cff' : 'var(--gold)'}">${thumbs(es)}
+      <div class="grow"><h3>${fo.digital ? '🎮' : '📁'} ${esc(fo.name)}</h3><div class="small muted">${es.reduce((s, e) => s + e.qty, 0)} Karten · ${groupEntries(es).length} verschiedene${fo.digital ? ' · MTG Arena' : val ? ' · ' + fmtMoney(val) : ''}</div></div>
       <button class="iconbtn" data-fmenu="${fo.id}" aria-label="Ordner bearbeiten">⋯</button></div>`;
   }).join('');
   const none = state.collection.filter(e => !e.folder);
@@ -1179,7 +1300,7 @@ function folderListHTML() {
 
 function setListHTML() {
   const sets = new Map();
-  for (const e of state.collection) {
+  for (const e of physical()) {
     const c = state.cards.get(e.sid);
     const code = c?.set || e.set || '?';
     const s = sets.get(code) || { code, name: c?.setName || e.setName || code.toUpperCase(), qty: 0, names: new Set() };
@@ -1197,9 +1318,10 @@ function gridViewHTML() {
   const f = state.filter;
   const es = scopeEntries();
   const total = es.reduce((s, e) => s + e.qty, 0);
-  const value = es.reduce((s, e) => s + (parseFloat(state.cards.get(e.sid)?.eur) || 0) * e.qty, 0);
+  const digitalScope = isDigitalFolder(f.folder);
+  const value = entriesValue(es);
   const missing = es.filter(e => !e.sid || !state.cards.has(e.sid)).length;
-  const scopeTitle = f.folder != null ? '📁 ' + esc(f.folder === '_none' ? 'Ohne Ordner' : folderName(f.folder))
+  const scopeTitle = f.folder != null ? (digitalScope ? '🎮 ' : '📁 ') + esc(f.folder === '_none' ? 'Ohne Ordner' : folderName(f.folder))
     : f.set != null ? esc(state.cards.get(es[0]?.sid)?.setName || f.set.toUpperCase()) : '';
   const fc = (v, label) => `<button class="fchip ${f.colors.includes(v) ? 'on' : ''}" data-fcolor="${v}">${label}</button>`;
   return `
@@ -1209,8 +1331,9 @@ function gridViewHTML() {
     <div class="stats" style="margin-top:10px">
       <div class="stat"><b>${total}</b><span>Karten</span></div>
       <div class="stat"><b>${groupEntries(es).length}</b><span>verschiedene</span></div>
-      <div class="stat"><b>${value ? Math.round(value) + ' €' : '–'}</b><span>Wert (ca.)</span></div>
+      ${digitalScope ? '<div class="stat"><b>🎮</b><span>MTG Arena</span></div>' : `<div class="stat"><b>${fmtMoney(value)}</b><span>Wert · ${PRICE_SRC[priceSrc()].label}</span></div>`}
     </div>
+    ${f.folder != null && f.folder !== '_none' ? `<button class="btn block sm" id="listImp" style="margin-top:8px">＋ Liste einfügen (z. B. Arena-Export)</button>` : ''}
     ${missing ? `<div class="panel small row"><span class="chip warn">${missing}</span><span class="grow">Einträge ohne Kartendaten. <a href="#" data-act="refetch">Jetzt nachladen</a></span></div>` : ''}
     <div class="toolbar">
       <input type="search" id="q" placeholder="Karte, Typ suchen …" value="${esc(f.q)}" class="grow">
@@ -1243,6 +1366,7 @@ function wireGrid() {
     b.classList.toggle('on'); f.limit = 150; renderGrid();
   }));
   $('#scopeBack')?.addEventListener('click', () => { f.folder = null; f.set = null; render(); });
+  $('#listImp')?.addEventListener('click', () => openListImport(f.folder));
   $('[data-fmenu2]')?.addEventListener('click', e => openFolderMenu(e.currentTarget.dataset.fmenu2));
   $('#setToFolder')?.addEventListener('click', () => {
     const es = scopeEntries();
@@ -1265,7 +1389,7 @@ function tileHTML(x) {
   const v = x.card ? view(x.card, targetLang(x.entries)) : null;
   const c = x.card ? { ...x.card, img: v.img, name: v.name } : { name: x.name };
   const sel = state.select?.has(x.name);
-  return `<div class="tile ${sel ? 'selected' : ''}" data-card="${esc(x.name)}" ${x.card?.oid ? `data-oid="${x.card.oid}"` : ''}>${imgTag(c)}<span class="qty">${x.qty}×</span>${x.foil ? '<span class="foil">FOIL</span>' : ''}${state.select ? `<span class="check">${sel ? '✓' : ''}</span>` : ''}</div>`;
+  return `<div class="tile ${sel ? 'selected' : ''}" data-card="${esc(x.name)}" ${x.card?.oid ? `data-oid="${x.card.oid}"` : ''}>${imgTag(c)}<span class="qty">${x.qty}×</span>${x.foil ? `<span class="foil">${x.foil === x.qty ? 'FOIL' : x.foil + '× FOIL'}</span>` : ''}${state.select ? `<span class="check">${sel ? '✓' : ''}</span>` : ''}</div>`;
 }
 
 function renderGrid() {
@@ -1304,7 +1428,7 @@ function updateSelectBar() {
 function decksUsing(name) { return state.decks.filter(d => d.cards.some(c => c.name === name)); }
 
 function cardDetailHTML(name, idx, total) {
-  const x = grouped().find(g => g.name === name);
+  const x = cardGroup(name);
   const c = x?.card || state.decks.flatMap(d => d.cards).filter(k => k.name === name).map(k => cardById(k.sid)).find(Boolean);
   const nav = total > 1 ? `<button class="iconbtn" data-nav="-1" ${idx === 0 ? 'disabled' : ''}>${ICON.back}</button><span class="small muted" style="min-width:64px;text-align:center">${idx + 1} / ${total}</span><button class="iconbtn" data-nav="1" ${idx === total - 1 ? 'disabled' : ''} style="transform:scaleX(-1)">${ICON.back}</button>` : '';
   const head = `<div class="row" style="margin-bottom:8px">${nav}<span class="grow"></span><button class="iconbtn" data-close>${ICON.close}</button></div>`;
@@ -1312,18 +1436,29 @@ function cardDetailHTML(name, idx, total) {
   const v = view(c, targetLang(x?.entries));
   const legal = ['standard', 'pioneer', 'modern', 'pauper'].map(k => `<span class="chip ${c.leg?.[k] === 'legal' ? 'good' : 'bad'}">${FORMATS[k].label}</span>`).join(' ');
   const used = decksUsing(name);
+  const src = priceSrc();
+  const phys = x ? x.entries.filter(e => !isDigital(e)) : [];
+  const unit = unitPrice({ foil: false, buy: phys[0]?.buy }, c), unitFoil = src !== 'purchase' ? unitPrice({ foil: true }, c) : 0;
+  const shopUrl = c.shop?.[src === 'purchase' ? 'cardmarket' : src];
+  const priceRow = `<div class="panel small" style="margin:10px 0">
+      <div class="row"><span class="grow muted">Preis · ${PRICE_SRC[src].label}</span><b>${fmtMoney(unit, true)}</b>${unitFoil && unitFoil !== unit ? `<span class="muted">· Foil ${fmtMoney(unitFoil, true)}</span>` : ''}</div>
+      ${phys.length ? `<div class="row" style="margin-top:4px"><span class="grow muted">Deine ${phys.reduce((s, e) => s + e.qty, 0)} Exemplare</span><b style="color:var(--gold)">${fmtMoney(entriesValue(phys), true)}</b></div>` : ''}
+      ${shopUrl ? `<a href="${esc(shopUrl)}" target="_blank" rel="noopener" class="tiny">Bei ${src === 'purchase' ? 'Cardmarket' : PRICE_SRC[src].label} ansehen ↗</a>` : ''}
+    </div>`;
   return `${head}
     <div class="cimgWrap">${v.img ? `<img class="cardimg" id="cimg" src="${esc(v.img)}" alt="${esc(v.name)}">` : `<div class="cardimg ph" style="aspect-ratio:488/680"><span class="t">${esc(v.name)}</span></div>`}</div>
     <p class="tiny muted" style="text-align:center;margin:6px 0 0">${total > 1 ? 'Wischen zum Blättern' : ''}${total > 1 && v.imgBack ? ' · ' : ''}${v.imgBack ? 'Bild antippen zum Umdrehen' : ''}</p>
     <div class="row" style="margin-top:12px"><h2 class="grow">${esc(v.name)}</h2>${manaHTML(c.mana)}</div>
     ${v.name !== c.name ? `<div class="muted small">${esc(c.name)}</div>` : ''}
+    ${v.fallback ? `<div class="tiny muted" style="margin-top:2px">Keine ${esc((LANG_LABEL[v.fallback] || v.fallback).toUpperCase())}-Version bei Scryfall – Anzeige auf ${esc((LANG_LABEL[v.lang] || v.lang).toUpperCase())}${/Token/.test(c.type) ? ' (Token gibt es dort fast nur auf Englisch)' : ''}.</div>` : ''}
     <div class="muted small" style="margin:4px 0 10px">${esc(v.type)}</div>
     ${v.text ? `<div class="oracle">${esc(v.text)}</div>` : ''}
     <div class="row wrap" style="margin:12px 0">${legal}</div>
+    ${priceRow}
     ${x ? `<h3 style="margin:16px 0 6px">Deine Exemplare (${x.qty})</h3>
       ${x.entries.map((e, i) => { const k = state.cards.get(e.sid); return `<div class="erow">
         <div class="grow small"><div>${esc(k?.setName || e.setName || e.set.toUpperCase())} #${esc(k?.num || e.number)}${e.foil ? ' · <b style="color:#f6a">Foil</b>' : ''} <span class="chip" style="padding:1px 6px;font-size:10.5px">${LANG_LABEL[e.lang || k?.lang] || (e.lang || k?.lang || 'EN').toUpperCase()}</span></div>
-        <button class="linkbtn" data-emove="${i}">📁 ${esc(folderName(e.folder))}</button></div>
+        <button class="linkbtn" data-emove="${i}">${isDigital(e) ? '🎮' : '📁'} ${esc(folderName(e.folder))}</button>${!isDigital(e) && unitPrice(e, k) ? ` <span class="tiny muted">· ${fmtMoney(unitPrice(e, k), true)}/Stk.${e.buy && src !== 'purchase' ? ` · gekauft ${e.buy.toLocaleString('de-DE', { minimumFractionDigits: 2 })} ${esc(e.buyCur || '')}` : ''}</span>` : ''}</div>
         <button class="qbtn" data-eq="${i}" data-d="-1">−</button><b style="width:26px;text-align:center">${e.qty}</b><button class="qbtn" data-eq="${i}" data-d="1">+</button></div>`; }).join('')}` : ''}
     ${used.length ? `<h3 style="margin:16px 0 6px">In Decks</h3>${used.map(d => `<div class="kv small"><span>${esc(d.name)}</span><b>${d.cards.find(k => k.name === name).n}×</b></div>`).join('')}` : ''}
     ${x && !analyze(c).isLand ? `<button class="btn block primary" style="margin-top:16px" data-around>Deck um diese Karte bauen</button>` : ''}`;
@@ -1345,7 +1480,7 @@ function openCard(name, list) {
     body.innerHTML = cardDetailHTML(list[idx], idx, list.length);
     if (dir) { body.classList.remove('slide-l', 'slide-r'); void body.offsetWidth; body.classList.add(dir > 0 ? 'slide-l' : 'slide-r'); }
     const img = body.querySelector('#cimg');
-    const x = grouped().find(g => g.name === list[idx]);
+    const x = cardGroup(list[idx]);
     const v = x?.card && view(x.card, targetLang(x.entries));
     if (img && v?.imgBack) { let back = false; img.onclick = () => { back = !back; img.src = back ? v.imgBack : v.img; }; }
   };
@@ -1356,7 +1491,7 @@ function openCard(name, list) {
     if (e.target.closest('[data-close]')) { closeSheet(); return; }
     const nv = e.target.closest('[data-nav]');
     if (nv) { go(+nv.dataset.nav); return; }
-    const x = grouped().find(g => g.name === list[idx]);
+    const x = cardGroup(list[idx]);
     const q = e.target.closest('[data-eq]');
     if (q && x) {
       await changeQty(x.entries[+q.dataset.eq], +q.dataset.d); edited = true; draw(); return;
@@ -1418,14 +1553,26 @@ $('#csvInput').addEventListener('change', async (ev) => {
   catch (e) { toast(e.message, 5000); return; }
   const total = entries.reduce((s, e) => s + e.qty, 0);
   const binders = new Set(entries.map(e => e.binder).filter(Boolean));
-  if (!state.collection.length) return doImport(entries, 'replace');
+  if (!state.collection.length && !state.folders.some(f => f.digital)) return doImport(entries, 'replace');
+  let target = null;
   const body = openSheet(`<h2>Import</h2>
     <p class="muted">${entries.length} Einträge mit insgesamt <b>${total}</b> Karten erkannt${binders.size ? ` aus ${binders.size} Binder(n) → werden zu Ordnern` : ''}.</p>
-    <button class="btn primary block" data-m="replace">Sammlung ersetzen</button>
-    <p class="tiny muted" style="margin:4px 2px 12px">Empfohlen beim Export der kompletten Sammlung. Deine Ordnerzuordnungen bleiben erhalten.</p>
-    <button class="btn block" data-m="merge">Zur Sammlung hinzufügen</button>
+    <div class="row" style="margin:6px 0 12px"><span class="grow small muted">Ziel</span><button class="fchip on" id="itarget">Ganze Sammlung</button></div>
+    <button class="btn primary block" data-m="replace" id="irep">Sammlung ersetzen</button>
+    <p class="tiny muted" style="margin:4px 2px 12px" id="irephint">Empfohlen beim Export der kompletten Sammlung. Ordnerzuordnungen und digitale Ordner bleiben erhalten.</p>
+    <button class="btn block" data-m="merge">Hinzufügen</button>
     <p class="tiny muted" style="margin:4px 2px">Für einzelne Binder oder Neuzugänge.</p>`);
-  body.querySelectorAll('[data-m]').forEach(b => b.onclick = () => { closeSheet(); doImport(entries, b.dataset.m); });
+  body.querySelector('#itarget').onclick = () => folderPicker('Import in Ordner', (id) => {
+    target = id;
+    body.querySelector('#itarget').textContent = id ? (isDigitalFolder(id) ? '🎮 ' : '📁 ') + folderName(id) : 'Ganze Sammlung';
+    body.querySelector('#irep').textContent = id ? 'Ordner ersetzen' : 'Sammlung ersetzen';
+    body.querySelector('#irephint').textContent = id ? 'Ersetzt nur den Inhalt dieses Ordners.' : 'Empfohlen beim Export der kompletten Sammlung. Ordnerzuordnungen und digitale Ordner bleiben erhalten.';
+  });
+  body.querySelectorAll('[data-m]').forEach(b => b.onclick = () => {
+    closeSheet();
+    if (target) entries.forEach(e => { if (!e.binder) e.folder = target; });
+    doImport(entries, b.dataset.m, target);
+  });
 });
 
 /** Ordnerzuordnung alter Einträge auf neue (ohne Binder) übertragen */
@@ -1461,7 +1608,7 @@ function normalizeCollection(coll) {
   return [...m.values()];
 }
 
-async function doImport(entries, mode) {
+async function doImport(entries, mode, target = null) {
   // Binder → Ordner
   const byName = new Map(state.folders.map(f => [f.name.toLowerCase(), f]));
   const newFolders = [];
@@ -1471,14 +1618,20 @@ async function doImport(entries, mode) {
     if (!f) { f = { id: uid(), name: e.binder, created: Date.now() }; byName.set(e.binder.toLowerCase(), f); newFolders.push(f); }
     e.folder = f.id;
   }
-  let coll = mode === 'merge' ? state.collection.map(e => ({ ...e })).concat(entries) : entries;
+  // Ersetzen betrifft nur den Zielbereich: einen Ordner – oder die physische Sammlung (digitale Ordner bleiben)
+  const keep = mode === 'merge' ? state.collection.map(e => ({ ...e }))
+    : target ? state.collection.filter(e => e.folder !== target).map(e => ({ ...e }))
+      : state.collection.filter(e => isDigital(e)).map(e => ({ ...e }));
+  const oldScope = mode === 'merge' ? [] : target ? state.collection.filter(e => e.folder === target) : physical();
+  let coll = keep.concat(entries);
   overlay(spinnerHTML('Lade Kartendaten von Scryfall …', 'Bei großen Sammlungen kann das etwas dauern.'));
   let notFound = [], offline = false;
   try {
     notFound = await enrichFromScryfall(coll, (d, t, pass) =>
       overlay(spinnerHTML(pass ? 'Zweiter Versuch über Kartennamen …' : 'Lade Kartendaten von Scryfall …', `${d} / ${t}<div class="bar"><i style="width:${Math.round(d / t * 100)}%"></i></div>`)));
   } catch (e) { offline = true; console.warn(e); }
-  if (mode !== 'merge') coll = preserveFolders(coll, state.collection);
+  notFound = notFound.filter(e => entries.includes(e));
+  if (mode !== 'merge' && !target) coll = keep.concat(preserveFolders(entries, oldScope));
   coll = normalizeCollection(coll);
   if (newFolders.length) { state.folders.push(...newFolders); await DB.putMany('folders', newFolders); }
   await DB.clear('collection'); await DB.putMany('collection', coll);
@@ -1593,10 +1746,13 @@ const NAME_BOX_TIGHT = [0.06, 0.04, 0.75, 0.10];
 let ocr = null;
 
 function loadScript(src) {
+  if (window.Tesseract) return Promise.resolve();
   return new Promise((res, rej) => {
-    if ([...document.scripts].some(s => s.src === src)) return res();
+    [...document.scripts].filter(x => x.src === src).forEach(x => x.remove());   // fehlgeschlagenen Versuch entfernen
     const s = document.createElement('script');
-    s.src = src; s.onload = res; s.onerror = () => rej(new Error('Konnte Texterkennung nicht laden (Internet?)'));
+    s.src = src;
+    s.onload = () => window.Tesseract ? res() : rej(new Error('Texterkennung unvollständig geladen'));
+    s.onerror = () => { s.remove(); rej(new Error('Konnte Texterkennung nicht laden (Internet?)')); };
     document.head.appendChild(s);
   });
 }
@@ -1855,7 +2011,7 @@ function openScanner() {
     </div>
     <div class="row" style="gap:8px;margin:8px 0">
       <button class="btn grow" id="sshot">Auslösen</button>
-      <button class="btn grow" id="sagain" disabled>+1 Nochmal</button>
+      <button class="btn grow" id="sagain" disabled title="Letzte Karte noch einmal hinzufügen">＋1</button>
       <button class="btn grow" id="ssearch">Suchen</button>
     </div>
     <div id="spending"></div>
@@ -2096,10 +2252,10 @@ function renderBuild() {
   main.innerHTML = `
     <div class="panel">
       <label class="field"><span>Format</span></label>
-      <div class="filters" data-seg="format">${Object.entries(FORMATS).map(([k, F]) => `<button class="fchip ${b.format === k ? 'on' : ''}" data-v="${k}">${F.label}</button>`).join('')}</div>
+      <div class="filters" data-seg="format">${Object.entries(FORMATS).filter(([, F]) => !F.arena || state.folders.some(f => f.digital)).map(([k, F]) => `<button class="fchip ${b.format === k ? 'on' : ''}" data-v="${k}">${F.label}</button>`).join('')}</div>
       ${state.folders.length ? `<label class="field"><span>Karten aus</span></label>
-      <div class="filters" id="bfolders"><button class="fchip ${b.folders.length ? '' : 'on'}" data-bf="">Ganze Sammlung</button>
-        ${state.folders.map(f => `<button class="fchip ${b.folders.includes(f.id) ? 'on' : ''}" data-bf="${f.id}">📁 ${esc(f.name)}</button>`).join('')}
+      <div class="filters" id="bfolders"><button class="fchip ${b.folders.length ? '' : 'on'}" data-bf="">Ganze Sammlung (physisch)</button>
+        ${state.folders.map(f => `<button class="fchip ${b.folders.includes(f.id) ? 'on' : ''}" data-bf="${f.id}">${f.digital ? '🎮' : '📁'} ${esc(f.name)}</button>`).join('')}
         <button class="fchip ${b.folders.includes('_none') ? 'on' : ''}" data-bf="_none">Ohne Ordner</button></div>` : ''}
       <label class="field"><span>Farben</span></label>
       ${seg('colorMode', [['mono', 'Mono'], ['dual', 'Zweifarbig'], ['all', 'Alle'], ['pick', 'Wählen']])}
@@ -2253,18 +2409,19 @@ function groupOf(c) {
 }
 function deckRowName(name, c) {
   if (!c || Settings.get('cardLang') === 'en') return name;
-  const x = grouped().find(g => g.name === name);
+  const x = cardGroup(name);
   return displayName(c, x?.entries) || name;
 }
 function isSaved(deck) { return state.decks.some(d => d.id === deck.id); }
 
 function usageConflicts(deck) {
+  if (deck.digital) return new Map();
   const owned = new Map(grouped().map(x => [x.name, x.qty]));
   const out = new Map();
   for (const it of deck.cards) {
     const c = cardById(it.sid);
     if (c && analyze(c).isBasic && Settings.get('unlimitedBasics')) continue;
-    const other = state.decks.filter(d => d.id !== deck.id).reduce((s, d) => s + (d.cards.find(k => k.name === it.name)?.n || 0), 0);
+    const other = state.decks.filter(d => d.id !== deck.id && !d.digital).reduce((s, d) => s + (d.cards.find(k => k.name === it.name)?.n || 0), 0);
     if (other && other + it.n > (owned.get(it.name) || 0)) out.set(it.name, other);
   }
   return out;
@@ -2291,7 +2448,8 @@ function openDeck(deck) {
         <span class="chip">${pipsHTML(deck.colors)}</span><span class="chip">${F.label}</span><span class="chip">${ARCH_DE[deck.arch] || deck.arch}</span>
         ${deck.score != null ? `<span class="chip good">Stärke ${deck.score}</span>` : ''}
         <span class="chip ${st.total === F.size ? 'good' : 'warn'}">${st.total}/${F.size}</span>
-        ${deck.folders?.length ? `<span class="chip">📁 ${deck.folders.map(id => esc(folderName(id === '_none' ? null : id))).join(', ')}</span>` : ''}
+        ${deck.folders?.length ? `<span class="chip">${deck.digital ? '🎮' : '📁'} ${deck.folders.map(id => esc(folderName(id === '_none' ? null : id))).join(', ')}</span>` : ''}
+        ${deck.digital ? '' : (() => { const v = deck.cards.reduce((s, it) => { const c = cardById(it.sid); return s + (c && !analyze(c).isBasic ? unitPrice({ foil: false, buy: physical().find(e => e.sid === it.sid)?.buy }, c) * it.n : 0); }, 0); return v ? `<span class="chip">≈ ${fmtMoney(v)}</span>` : ''; })()}
       </div>
       ${deck.warnings.map(w => `<div class="chip warn" style="margin-top:8px">⚠ ${esc(w)}</div>`).join(' ')}
       ${deck.missing?.length ? `<div class="small muted" style="margin-top:6px">Fehlt: ${deck.missing.map(m => `${m.n}× ${m.name}`).join(', ')}</div>` : ''}
@@ -2336,7 +2494,7 @@ function openDeck(deck) {
       if (d > 0) {
         const c = cardById(it.sid), F = FORMATS[deck.format];
         const basic = c && analyze(c).isBasic;
-        const owned = grouped().find(x => x.name === name)?.qty || 0;
+        const owned = ownedGroups(deck).find(x => x.name === name)?.qty || 0;
         const lim = basic && Settings.get('unlimitedBasics') ? 99 : Math.min(owned, basic ? 99 : maxCopies(F));
         if (it.n >= lim) { toast(owned < maxCopies(F) && !basic ? `Du besitzt nur ${owned}×` : 'Maximum erreicht'); return; }
         it.n++;
@@ -2405,7 +2563,7 @@ function applySwap(deck, i) {
   const t = deck.analysis?.tausch?.[i]; if (!t) return;
   const n = Math.max(1, parseInt(t.anzahl, 10) || 1);
   const out = deck.cards.find(c => c.name.toLowerCase() === String(t.raus).toLowerCase() || c.name.split(' // ')[0].toLowerCase() === String(t.raus).toLowerCase());
-  const inG = grouped().find(x => x.card && (x.name.toLowerCase() === String(t.rein).toLowerCase() || x.name.split(' // ')[0].toLowerCase() === String(t.rein).toLowerCase()));
+  const inG = ownedGroups(deck).find(x => x.card && (x.name.toLowerCase() === String(t.rein).toLowerCase() || x.name.split(' // ')[0].toLowerCase() === String(t.rein).toLowerCase()));
   if (!out || !inG) { toast('Karte nicht gefunden – Tausch nicht möglich'); return; }
   const have = deck.cards.find(c => c.name === inG.name);
   const k = Math.min(n, out.n, inG.qty - (have?.n || 0));
@@ -2471,6 +2629,18 @@ function renderSettings() {
       ${lang !== 'en' ? `<button class="btn block" id="sprefetch">Sprachversionen jetzt für alle Karten laden</button>` : ''}
     </div>
     <div class="panel">
+      <h2>Kartenwert</h2>
+      <p class="small muted">Welche Preisquelle für Sammlungswert, Sortierung und Karten verwendet wird. Preise kommen täglich aktualisiert über Scryfall.</p>
+      <div class="filters" id="sprice">${Object.entries(PRICE_SRC).map(([k, v]) => `<button class="fchip ${priceSrc() === k ? 'on' : ''}" data-v="${k}">${v.label}</button>`).join('')}</div>
+      <p class="tiny muted" style="margin:6px 2px">${PRICE_SRC[priceSrc()].hint}${priceSrc() === 'purchase' ? ' – fehlt der Kaufpreis bei einer Karte, zählt sie mit 0.' : ''}. Stand: ${+S.get('lastCardRefresh') ? new Date(+S.get('lastCardRefresh')).toLocaleDateString('de-DE') : 'beim Import'}</p>
+      <button class="btn block sm" id="sprefresh">Preise jetzt aktualisieren</button>
+    </div>
+    <div class="panel">
+      <h2>Darstellung</h2>
+      <div class="toggle"><div><b>Bedienknöpfe unten</b><div class="small muted">Zurück/Schließen in Vollbild-Ansichten (Deck, Scanner) unten statt oben – praktisch auf großen iPhones</div></div>
+        <label class="switch"><input type="checkbox" id="sctlb" ${S.get('controlsBottom') ? 'checked' : ''}><span></span></label></div>
+    </div>
+    <div class="panel">
       <h2>💾 Backup</h2>
       <p class="small muted">Sammlung, Ordner, Decks und Einstellungen als Datei sichern, z. B. in Google Drive. Letztes Backup: <b>${last ? new Date(last).toLocaleDateString('de-DE') : 'noch nie'}</b></p>
       <div class="row"><button class="btn primary grow" data-act="backup">Backup erstellen</button><button class="btn grow" data-act="restore">Wiederherstellen</button></div>
@@ -2501,6 +2671,7 @@ function renderSettings() {
       <div class="kv small"><span>Gespeicherte Decks</span><b>${state.decks.length}</b></div>
       <div class="kv small"><span>Sprachversionen im Cache</span><b>${state.loc.size}</b></div>
       <button class="btn block" style="margin-top:12px" data-act="import">ManaBox-CSV importieren</button>
+      <button class="btn block" style="margin-top:8px" id="slist">Liste einfügen (Arena, Moxfield …)</button>
       <button class="btn block" style="margin-top:8px" id="srefetch">Fehlende Kartendaten nachladen</button>
       <button class="btn block" style="margin-top:8px" id="supdate">Alle Kartendaten aktualisieren</button>
       <button class="btn danger block" style="margin-top:8px" id="sclear">Sammlung löschen</button>
@@ -2528,6 +2699,15 @@ function renderSettings() {
   };
   $('#sbasics').onchange = e => S.set('unlimitedBasics', e.target.checked);
   $$('#slang [data-v]').forEach(b => b.onclick = () => { S.set('cardLang', b.dataset.v); renderSettings(); });
+  $$('#sprice [data-v]').forEach(b => b.onclick = () => { S.set('priceSource', b.dataset.v); renderSettings(); });
+  $('#sctlb').onchange = e => { S.set('controlsBottom', e.target.checked); applyDisplay(); };
+  $('#slist').onclick = () => openListImport(null);
+  $('#sprefresh').onclick = async () => {
+    overlay(spinnerHTML('Aktualisiere Preise …'));
+    try { await refreshAllCards((d, t) => overlay(spinnerHTML('Aktualisiere Preise …', `${d} / ${t}`))); toast('Preise aktualisiert ✓'); }
+    catch { toast('Scryfall nicht erreichbar.'); }
+    overlay(); renderSettings();
+  };
   $('#sprefetch')?.addEventListener('click', async () => {
     const groups = grouped().filter(x => x.card?.oid);
     groups.forEach(x => view(x.card, targetLang(x.entries)));   // stellt fehlende in die Warteschlange
@@ -2560,12 +2740,20 @@ function renderSettings() {
    ============================================================ */
 /** Kartendaten aus v0.1 enthalten noch keine Sprachfelder → einmalig im Hintergrund neu laden */
 async function upgradeCardCache() {
-  const stale = [...state.cards.values()].filter(c => c.lang === undefined);
-  if (!stale.length || !navigator.onLine) return;
+  if (!navigator.onLine || !state.collection.length) return;
+  const stale = [...state.cards.values()].filter(c => c.lang === undefined || c.prices === undefined || c.leg?.historic === undefined);
+  if (!stale.length) {
+    // Preise wöchentlich still im Hintergrund auffrischen
+    if (Date.now() - (+Settings.get('lastCardRefresh') || 0) > 7 * 864e5) {
+      refreshAllCards().then(() => { if (state.view === 'collection' && !sheets.length) render(); }).catch(e => console.warn(e));
+    }
+    return;
+  }
   toast('Aktualisiere Kartendaten für die Sprachfunktion …', 3000);
   stale.forEach(c => { state.cards.delete(c.id); anCache.delete(c.id); });
   try {
     await enrichFromScryfall(state.collection);
+    Settings.set('lastCardRefresh', Date.now());
     state.grouped = null;
     if (state.view === 'collection' && !sheets.length) render();
     toast('Kartendaten aktualisiert ✓');
@@ -2575,8 +2763,11 @@ async function upgradeCardCache() {
   }
 }
 
+function applyDisplay() { document.body.classList.toggle('ctl-bottom', !!Settings.get('controlsBottom')); }
+
 async function init() {
   Settings.load();
+  applyDisplay();
   try {
     await DB.open();
     const [coll, cards, decks, folders, loc] = await Promise.all(['collection', 'cards', 'decks', 'folders', 'loc'].map(st => DB.all(st)));

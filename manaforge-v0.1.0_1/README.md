@@ -1,4 +1,4 @@
-# Manaforge – Prototyp v0.3.0
+# Manaforge – Prototyp v0.4.0
 
 PWA zum Import von ManaBox-CSV-Exporten und zum Deckbau aus der eigenen Sammlung.
 
@@ -17,6 +17,13 @@ Updates: geänderte Dateien ins Repo hochladen; die App lädt beim nächsten Öf
 - `sw.js`, `manifest.webmanifest`, `icons/` – Installierbarkeit & Offline
 
 Daten: Scryfall API (Kartendaten/Bilder), optional Gemini API (eigener Key aus Google AI Studio).
+
+## Neu in v0.4.0
+- iPhone: Vollbild-Ansichten (Scanner, Deck) wurden oben abgeschnitten – behoben; Safe-Area für Notch/Dynamic Island; Einstellung „Bedienknöpfe unten“
+- Kartenwert mit wählbarer Preisquelle: Cardmarket (€), TCGplayer ($), Cardhoarder (tix) oder eigener Kaufpreis aus ManaBox; Foil-Preise; Shop-Link pro Karte; Deckwert; Preise wöchentlich automatisch aktualisiert
+- Digitale Ordner (🎮 MTG Arena): getrennt von physischer Sammlung, Wert und Deckbau; Arena-Formate Historic, Timeless, Explorer, Alchemy
+- „Liste einfügen“: Decklisten/Exporte aus MTG Arena, Moxfield, Archidekt, MTGO in einen Ordner importieren
+- CSV-Import wahlweise in einen bestimmten Ordner
 
 ## Neu in v0.3.0
 - Eigener Kartenscanner (📷 in der Sammlung): Texterkennung auf dem Gerät liest Sammlernummer, Set-Code, Sprache und Namen; Abgleich mit Scryfall; Gemini-Foto-Erkennung als Fallback
