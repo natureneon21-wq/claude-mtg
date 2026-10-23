@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://natureneon21-wq.github.io/claude-mtg/manaforge-v0.1.0_1/"><b>▶ Open the live app</b></a>
+  <a href="https://natureneon21-wq.github.io/manaforge/"><b>▶ Open the live app</b></a>
   &nbsp;·&nbsp; <a href="#features">Features</a>
   &nbsp;·&nbsp; <a href="#installation">Installation</a>
   &nbsp;·&nbsp; <a href="#how-it-works">How it works</a>
@@ -71,7 +71,7 @@ Manaforge is a Progressive Web App and needs no app store.
 
 | Platform | Steps |
 |---|---|
-| **Android** (Chrome) | Open the [live app](https://natureneon21-wq.github.io/claude-mtg/manaforge-v0.1.0_1/) → menu **⋮** → **Install app** / **Add to home screen** |
+| **Android** (Chrome) | Open the [live app](https://natureneon21-wq.github.io/manaforge/) → menu **⋮** → **Install app** / **Add to home screen** |
 | **iPhone / iPad** (Safari) | Open the live app → **Share** → **Add to Home Screen** |
 | **Desktop** (Chrome / Edge) | Open the live app → install icon in the address bar |
 
@@ -119,23 +119,25 @@ ManaBox CSV / text list / camera
 ## Project structure
 
 ```
-manaforge-v0.1.0_1/        the deployed app (served via GitHub Pages)
-├── index.html             markup, styles and the 16 themes
-├── app.js                 all application logic
-├── sw.js                  service worker (offline cache)
-├── manifest.webmanifest   PWA manifest
-└── icons/                 app icons
-docs/                      images used in this README
-CHANGELOG.md               version history
-LICENSE                    MIT license
+index.html             markup, styles and the 16 themes
+app.js                 all application logic
+sw.js                  service worker (offline cache)
+manifest.webmanifest   PWA manifest
+icons/                 app icons
+docs/                  images used in this README
+CHANGELOG.md           version history
+LICENSE                MIT license
 ```
+
+The repository root is served directly via GitHub Pages – every commit to `main` is live within about a minute.
 
 ## Local development
 
-No tooling is required – serve the app folder with any static web server:
+No tooling is required – serve the repository with any static web server:
 
 ```bash
-cd manaforge-v0.1.0_1
+git clone https://github.com/natureneon21-wq/manaforge.git
+cd manaforge
 python3 -m http.server 8080
 # open http://localhost:8080
 ```

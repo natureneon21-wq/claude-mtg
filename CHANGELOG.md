@@ -3,6 +3,9 @@
 All notable changes to Manaforge are documented here.
 
 ## [0.5.0] – 2026-10-23
+### Changed
+- Repository renamed to `manaforge`; the app is now served from the repository root at https://natureneon21-wq.github.io/manaforge/ (existing installations need to be re-added; local data is kept)
+
 ### Added
 - 16 themes: six mono-colour themes (Arcane Gold, Mushroom Forest, Grave Chant, Dragon Forge, Deep Sea, Cathedral) and one theme per two-colour guild
 - Hand-drawn edge decorations per theme that fade towards the centre, plus animated particles (fireflies, leaves, embers, rain, spores, bubbles …)
