@@ -2,6 +2,15 @@
 
 All notable changes to Manaforge are documented here.
 
+## [0.6.0] – 2026-10-23
+### Changed
+- All 16 themes rebuilt on the Mushroom Forest layout: an arch or canopy from both top corners, framing pillars along both screen edges (behind the content), four animated edge details plus two flying companions, and a ground strip with corner groups that keeps the camera button free
+- Mono-colour themes follow the basic lands: Cloud Realm (white), Deep Sea cliffs (blue), Dead Swamp (black), Ember Desert (red), Mushroom Forest (green); Arcane Gold becomes a ruined temple at night
+- Guild themes: Azorius sky archive with flying books, Dimir sunken ruins with tentacles, Rakdos volcanic cave with chains and a lava lake, Gruul rocks and autumn tree, Selesnya blossoming tree with butterflies, Orzhov gothic cathedral with candles and ghosts, Izzet copper pipes, storm clouds and Tesla coils, Golgari mushroom swamp, Boros sandstone arch with banners, Simic mangroves with cells and corals
+- New animated details: blinking crows and frogs, nodding lizards, waving crabs, will-o'-wisps, floating jellyfish and ghosts, dripping stalactites, water ripples, drifting clouds, flying doves and butterflies, a zombie hand
+- Theme graphics are now loaded per theme from `themes/<key>.json` (and cached for offline use), which makes `app.js` and `index.html` considerably smaller
+- Deck view uses the framing pillars of its colour theme
+
 ## [0.5.2] – 2026-10-23
 ### Changed
 - Mushroom Forest theme redesigned from a hand sketch: a tree canopy arching in from both top corners with leaves that sway individually in the wind, tree trunks along both screen edges (behind the content), hanging moss, a curling ivy tendril, glowing bracket fungi with a tiny nodding mushroom character, fairies flying small loops, and a forest floor with roots and mushroom clusters whose caps rock in the wind

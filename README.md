@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.5.2-d6b26a">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.6.0-d6b26a">
   <img alt="Platform" src="https://img.shields.io/badge/platform-PWA%20%C2%B7%20Android%20%C2%B7%20iOS-3e8ed6">
   <img alt="No build step" src="https://img.shields.io/badge/build-none%20(vanilla%20JS)-2f9e5a">
   <img alt="Status" src="https://img.shields.io/badge/status-prototype-e0563f">
@@ -56,7 +56,7 @@ It runs entirely in the browser, can be installed to the home screen like a nati
 - Export to ManaBox, Moxfield, Archidekt and MTG Arena; warns when a card is used in more saved decks than you own copies
 
 ### 🎨 Themes
-- **16 themes** – six mono-colour themes and one for each two-colour guild, each with its own typography, textures, animated particles and hand-drawn, animated edge decorations (nodding characters, swaying mushrooms, fluttering fairies …) that fade towards the centre
+- **16 themes** in a shared layout – six mono-colour landscapes (Cloud Realm, Deep Sea, Dead Swamp, Ember Desert, Mushroom Forest, Ruined Temple) and one scene for each two-colour guild – each with its own typography, a canopy or arch along the top, framing pillars on both edges, a ground strip and animated details (nodding mushroom folk, blinking crows and frogs, swaying leaves, drifting clouds, will-o'-wisps …)
 - Optional **card art backgrounds**, picked from your own collection
 - Decks automatically open in the theme of their colours, headed by the art of their strongest card
 
@@ -122,6 +122,7 @@ ManaBox CSV / text list / camera
 index.html             markup, styles and the 16 themes
 app.js                 all application logic
 sw.js                  service worker (offline cache)
+themes/                theme graphics, one JSON file per theme (loaded on demand)
 manifest.webmanifest   PWA manifest
 icons/                 app icons
 docs/                  images used in this README
