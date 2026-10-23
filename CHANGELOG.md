@@ -2,6 +2,13 @@
 
 All notable changes to Manaforge are documented here.
 
+## [0.5.1] – 2026-10-23
+### Added
+- Animated edge details in every theme: swaying mushrooms and ferns, a nodding and blinking mushroom character and a head-tilting owl (Mushroom Forest), fluttering fairies, flapping bats, clattering skulls, flickering flames, swimming fish, curling tentacles, spinning gears and runes, waving banners, pulsing cells and more
+- Animations pause when background animations are switched off or the system prefers reduced motion
+### Changed
+- Theme decorations are stored more compactly (base64 instead of URL-encoded SVG)
+
 ## [0.5.0] – 2026-10-23
 ### Changed
 - Repository renamed to `manaforge`; the app is now served from the repository root at https://natureneon21-wq.github.io/manaforge/ (existing installations need to be re-added; local data is kept)
