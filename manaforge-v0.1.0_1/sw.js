@@ -1,5 +1,5 @@
 /* Manaforge Service Worker – App offline verfügbar machen */
-const VERSION = 'manaforge-v0.4.0';
+const VERSION = 'manaforge-v0.5.0';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
 
 self.addEventListener('install', e => {

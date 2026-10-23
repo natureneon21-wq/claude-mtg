@@ -1,4 +1,4 @@
-# Manaforge – Prototyp v0.4.0
+# Manaforge – Prototyp v0.5.0
 
 PWA zum Import von ManaBox-CSV-Exporten und zum Deckbau aus der eigenen Sammlung.
 
@@ -17,6 +17,12 @@ Updates: geänderte Dateien ins Repo hochladen; die App lädt beim nächsten Öf
 - `sw.js`, `manifest.webmanifest`, `icons/` – Installierbarkeit & Offline
 
 Daten: Scryfall API (Kartendaten/Bilder), optional Gemini API (eigener Key aus Google AI Studio).
+
+## Neu in v0.5.0
+- 16 Designs (Einstellungen → Design): 6 einfarbige + 10 Gilden-Designs, jeweils mit eigener Schrift, Textur, Rand-Dekoration (nach innen ausfadend) und Hintergrund-Animation
+- Kartenkunst im Hintergrund: passendes Artwork aus der eigenen Sammlung (sonst Scryfall), mit Künstler-Credit
+- Decks öffnen automatisch im Design ihrer Farben (ein- und zweifarbig) mit dem Artwork der stärksten Karte
+- Hintergrund-Animationen abschaltbar
 
 ## Neu in v0.4.0
 - iPhone: Vollbild-Ansichten (Scanner, Deck) wurden oben abgeschnitten – behoben; Safe-Area für Notch/Dynamic Island; Einstellung „Bedienknöpfe unten“

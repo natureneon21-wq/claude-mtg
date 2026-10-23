@@ -1,6 +1,6 @@
 'use strict';
 /* Manaforge – MTG-Sammlung & Deckbau (Prototyp) */
-const APP_VERSION = '0.4.0';
+const APP_VERSION = '0.5.0';
 
 /* ============================================================
    Hilfsfunktionen
@@ -105,7 +105,7 @@ const DB = {
 };
 
 const Settings = {
-  defaults: { geminiKey: '', geminiModel: 'gemini-flash-latest', unlimitedBasics: true, limitedMaxCopies: 4, cardLang: 'scanned', lastBackup: 0, priceSource: 'cardmarket', lastCardRefresh: 0, controlsBottom: false },
+  defaults: { geminiKey: '', geminiModel: 'gemini-flash-latest', unlimitedBasics: true, limitedMaxCopies: 4, cardLang: 'scanned', lastBackup: 0, priceSource: 'cardmarket', lastCardRefresh: 0, controlsBottom: false, theme: 'default', deckTheme: true, fx: true, art: true, artPicks: {} },
   data: {},
   load() {
     try { this.data = { ...this.defaults, ...JSON.parse(localStorage.getItem('manaforge-settings') || '{}') }; }
@@ -243,7 +243,7 @@ function slimCard(c) {
     usd: c.prices?.usd || c.prices?.usd_foil || null, layout: c.layout,
     prices: { eur: c.prices?.eur || null, eur_foil: c.prices?.eur_foil || null, usd: c.prices?.usd || null, usd_foil: c.prices?.usd_foil || null, usd_etched: c.prices?.usd_etched || null, tix: c.prices?.tix || null },
     shop: { cardmarket: c.purchase_uris?.cardmarket || '', tcgplayer: c.purchase_uris?.tcgplayer || '', cardhoarder: c.purchase_uris?.cardhoarder || '' },
-    games: c.games || [],
+    games: c.games || [], artist: c.artist || c.card_faces?.[0]?.artist || '',
   };
 }
 
@@ -1226,7 +1226,7 @@ function backupHint() {
   const last = +Settings.get('lastBackup') || 0;
   const hasWork = state.decks.length || state.folders.length;
   if (!hasWork || Date.now() - last < 14 * 864e5) return '';
-  return `<div class="panel small row" style="border-color:#33405e"><span>💾</span><span class="grow">${last ? 'Letztes Backup vor ' + Math.floor((Date.now() - last) / 864e5) + ' Tagen.' : 'Noch kein Backup deiner Decks und Ordner.'}</span><button class="btn sm" data-act="backup">Sichern</button></div>`;
+  return `<div class="panel small row" style="border-color:var(--ai-line)"><span>💾</span><span class="grow">${last ? 'Letztes Backup vor ' + Math.floor((Date.now() - last) / 864e5) + ' Tagen.' : 'Noch kein Backup deiner Decks und Ordner.'}</span><button class="btn sm" data-act="backup">Sichern</button></div>`;
 }
 
 function renderCollection() {
@@ -1234,9 +1234,9 @@ function renderCollection() {
   state.select = null; updateSelectBar();
   if (!state.collection.length) {
     main.innerHTML = `<div class="empty">
-      <svg class="art" viewBox="0 0 120 120"><defs><linearGradient id="g1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f3dfa8"/><stop offset="1" stop-color="#a8843f"/></linearGradient></defs>
-      <rect x="30" y="18" width="52" height="74" rx="7" fill="#251d32" stroke="url(#g1)" stroke-width="3" transform="rotate(-10 56 55)"/>
-      <rect x="40" y="24" width="52" height="74" rx="7" fill="#1d1727" stroke="url(#g1)" stroke-width="3" transform="rotate(8 66 61)"/>
+      <svg class="art" viewBox="0 0 120 120"><defs><linearGradient id="g1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" style="stop-color:var(--gold-hi)"/><stop offset="1" style="stop-color:var(--gold2)"/></linearGradient></defs>
+      <rect x="30" y="18" width="52" height="74" rx="7" style="fill:var(--card2)" stroke="url(#g1)" stroke-width="3" transform="rotate(-10 56 55)"/>
+      <rect x="40" y="24" width="52" height="74" rx="7" style="fill:var(--card)" stroke="url(#g1)" stroke-width="3" transform="rotate(8 66 61)"/>
       <circle cx="66" cy="60" r="11" fill="none" stroke="url(#g1)" stroke-width="3"/><path d="M66 44v7M66 69v7M50 60h7M75 60h7" stroke="url(#g1)" stroke-width="3" stroke-linecap="round"/></svg>
       <h2>Deine Sammlung ist noch leer</h2>
       <p>Scanne deine Karten direkt mit der Kamera, importiere einen ManaBox-Export oder stelle ein Backup wieder her.</p>
@@ -1288,7 +1288,7 @@ function folderListHTML() {
   const rows = state.folders.slice().sort((a, b) => (a.digital ? 1 : 0) - (b.digital ? 1 : 0) || a.name.localeCompare(b.name)).map(fo => {
     const es = state.collection.filter(e => e.folder === fo.id);
     const val = fo.digital ? 0 : entriesValue(es);
-    return `<div class="sugg" data-folder="${fo.id}" style="--stripe:${fo.digital ? '#6c8cff' : 'var(--gold)'}">${thumbs(es)}
+    return `<div class="sugg" data-folder="${fo.id}" style="--stripe:${fo.digital ? 'var(--ai)' : 'var(--gold)'}">${thumbs(es)}
       <div class="grow"><h3>${fo.digital ? '🎮' : '📁'} ${esc(fo.name)}</h3><div class="small muted">${es.reduce((s, e) => s + e.qty, 0)} Karten · ${groupEntries(es).length} verschiedene${fo.digital ? ' · MTG Arena' : val ? ' · ' + fmtMoney(val) : ''}</div></div>
       <button class="iconbtn" data-fmenu="${fo.id}" aria-label="Ordner bearbeiten">⋯</button></div>`;
   }).join('');
@@ -1711,7 +1711,7 @@ $('#jsonInput').addEventListener('change', async (ev) => {
   const total = data.collection.reduce((s, e) => s + (e.qty || 0), 0);
   const body = openSheet(`<h2>Backup wiederherstellen</h2>
     <p class="muted">Backup vom <b>${new Date(data.created).toLocaleString('de-DE')}</b> (v${esc(data.version)}):<br>${total} Karten · ${(data.folders || []).length} Ordner · ${(data.decks || []).length} Decks</p>
-    <p class="small" style="color:#f0b35a">⚠ Deine aktuelle Sammlung, Ordner und Decks auf diesem Gerät werden ersetzt.</p>
+    <p class="small" style="color:var(--warn)">⚠ Deine aktuelle Sammlung, Ordner und Decks auf diesem Gerät werden ersetzt.</p>
     <button class="btn primary block" id="rok">Wiederherstellen</button>`);
   body.querySelector('#rok').onclick = async () => {
     closeSheet();
@@ -2269,7 +2269,7 @@ function renderBuild() {
         <datalist id="cardnames">${names.map(n => `<option value="${esc(n)}">`).join('')}</datalist>
       </label>
       <button class="btn primary block" id="go">Deckvorschläge berechnen</button>
-      <button class="btn block" id="goAI" style="margin-top:8px;border-color:#33405e;color:#9ec1ff">✦ Mit Gemini bauen${hasKey ? '' : ' (API-Key fehlt)'}</button>
+      <button class="btn block" id="goAI" style="margin-top:8px;border-color:var(--ai-line);color:var(--ai)">✦ Mit Gemini bauen${hasKey ? '' : ' (API-Key fehlt)'}</button>
     </div>
     <div id="results">${resultsHTML()}</div>`;
 
@@ -2372,8 +2372,8 @@ function suggHTML(d, i, saved = false) {
     <div class="grow">
       <h3>${esc(d.name)}</h3>
       <div class="row small muted" style="gap:6px">${pipsHTML(d.colors)} <span>${FORMATS[d.format].label} · ${st.total} Karten · Ø ${st.avg.toFixed(1)}</span></div>
-      ${d.score != null ? `<div class="bar"><i style="width:${d.score}%"></i></div>` : '<div class="tiny" style="color:#9ec1ff;margin-top:6px">✦ Gemini-Vorschlag</div>'}
-      ${d.warnings.length ? `<div class="tiny" style="color:#f0b35a;margin-top:5px">⚠ ${esc(d.warnings[0])}</div>` : ''}
+      ${d.score != null ? `<div class="bar"><i style="width:${d.score}%"></i></div>` : '<div class="tiny" style="color:var(--ai);margin-top:6px">✦ Gemini-Vorschlag</div>'}
+      ${d.warnings.length ? `<div class="tiny" style="color:var(--warn);margin-top:5px">⚠ ${esc(d.warnings[0])}</div>` : ''}
     </div>
   </div>`;
 }
@@ -2382,7 +2382,7 @@ function resultsHTML() {
   if (!state.results.length) return '';
   const top = state.results.find(d => d.score != null);
   const thin = top && top.warnings.some(w => w.startsWith('Nur'));
-  return `${thin ? `<div class="panel small" style="border-color:#5a4520;margin-top:16px">⚠ Für <b>${FORMATS[top.format].label}</b> hast du in diesen Farben nicht genug passende Karten für ein volles Deck. Probier „Casual 60“, „Limited 40“ oder andere Farben.</div>` : ''}
+  return `${thin ? `<div class="panel small" style="border-color:var(--warn-line);margin-top:16px">⚠ Für <b>${FORMATS[top.format].label}</b> hast du in diesen Farben nicht genug passende Karten für ein volles Deck. Probier „Casual 60“, „Limited 40“ oder andere Farben.</div>` : ''}
     <h2 style="margin:18px 0 4px">Vorschläge</h2><p class="small muted" style="margin:0 0 6px">Sortiert nach Stärke-Schätzung. Tippe für Details.</p>
     ${state.results.map((d, i) => suggHTML(d, i)).join('')}`;
 }
@@ -2429,6 +2429,7 @@ function usageConflicts(deck) {
 
 function openDeck(deck) {
   const body = openSheet('', { full: true, onClose: () => { if (state.view === 'decks') renderDecks(); } });
+  const hero = applyDeckTheme(body.parentElement, deck);
   let edit = false;
   const draw = () => {
     const st = deckStats(deck), F = FORMATS[deck.format];
@@ -2442,8 +2443,9 @@ function openDeck(deck) {
     const maxCurve = Math.max(1, ...st.curve);
     const pipTot = COLORS.reduce((s, k) => s + st.pips[k], 0) || 1;
     const saved = isSaved(deck);
-    body.innerHTML = `
+    body.innerHTML = `${hero ? '<div class="deckart"></div>' : ''}
       <div class="shead"><button class="iconbtn" data-x>${ICON.back}</button><h2 class="grow" style="font-size:17px">${esc(deck.name)}</h2></div>
+      ${hero ? `<div class="artcredit">${esc(hero.name)}${hero.artist ? ' · Illus. ' + esc(hero.artist) : ''}</div>` : ''}
       <div class="row wrap" style="gap:6px">
         <span class="chip">${pipsHTML(deck.colors)}</span><span class="chip">${F.label}</span><span class="chip">${ARCH_DE[deck.arch] || deck.arch}</span>
         ${deck.score != null ? `<span class="chip good">Stärke ${deck.score}</span>` : ''}
@@ -2453,7 +2455,7 @@ function openDeck(deck) {
       </div>
       ${deck.warnings.map(w => `<div class="chip warn" style="margin-top:8px">⚠ ${esc(w)}</div>`).join(' ')}
       ${deck.missing?.length ? `<div class="small muted" style="margin-top:6px">Fehlt: ${deck.missing.map(m => `${m.n}× ${m.name}`).join(', ')}</div>` : ''}
-      ${conflicts.size ? `<div class="panel small" style="border-color:#5a4520">⚠ ${conflicts.size} Karte(n) sind zusätzlich in anderen gespeicherten Decks verbaut und du besitzt nicht genug Exemplare für beide (markiert).</div>` : ''}
+      ${conflicts.size ? `<div class="panel small" style="border-color:var(--warn-line)">⚠ ${conflicts.size} Karte(n) sind zusätzlich in anderen gespeicherten Decks verbaut und du besitzt nicht genug Exemplare für beide (markiert).</div>` : ''}
       ${deck.ai ? aiDeckHTML(deck.ai) : ''}
       ${deck.analysis ? analysisHTML(deck.analysis) : ''}
       <div class="stats" style="grid-template-columns:repeat(4,1fr);margin-top:12px">
@@ -2470,13 +2472,13 @@ function openDeck(deck) {
         ${saved ? '' : '<button class="btn primary" data-save style="grid-column:1/-1">Deck speichern</button>'}
         <button class="btn" data-share>Exportieren</button>
         <button class="btn" data-edit>${edit ? 'Fertig' : 'Bearbeiten'}</button>
-        <button class="btn" data-ai style="border-color:#33405e;color:#9ec1ff;grid-column:1/-1">✦ KI-Analyse</button>
+        <button class="btn" data-ai style="border-color:var(--ai-line);color:var(--ai);grid-column:1/-1">✦ KI-Analyse</button>
       </div>
       ${order.filter(g => groups.has(g)).map(g => {
         const items = groups.get(g).sort((a, b) => (a.c?.cmc ?? 0) - (b.c?.cmc ?? 0) || a.it.name.localeCompare(b.it.name));
         return `<div class="group"><h3><span>${g}</span><span class="small muted">${items.reduce((s, x) => s + x.it.n, 0)}</span></h3>
           ${items.map(({ it, c }) => `<div class="crow ${conflicts.has(it.name) ? 'conflict' : ''}" data-cname="${esc(it.name)}">
-            <span class="n">${it.n}</span><span class="nm">${esc(deckRowName(it.name, c))}${conflicts.has(it.name) ? ' <span class="tiny" style="color:#f0b35a">⚠</span>' : ''}</span>
+            <span class="n">${it.n}</span><span class="nm">${esc(deckRowName(it.name, c))}${conflicts.has(it.name) ? ' <span class="tiny" style="color:var(--warn)">⚠</span>' : ''}</span>
             ${edit ? `<button class="qbtn" data-q="-1">−</button><button class="qbtn" data-q="1">+</button>` : manaHTML(c?.mana)}
           </div>`).join('')}</div>`;
       }).join('')}
@@ -2620,7 +2622,22 @@ function renderSettings() {
   const main = $('#main');
   const lang = S.get('cardLang');
   const last = +S.get('lastBackup') || 0;
+  const cur = THEMES[S.get('theme')] ? S.get('theme') : 'default';
   main.innerHTML = `
+    <div class="panel">
+      <h2>Design</h2>
+      ${[['Einfarbig', k => THEMES[k].colors.length <= 1], ['Zweifarbig · Gilden', k => THEMES[k].colors.length === 2]].map(([label, f]) => `<div class="themehead">${label}</div>
+      <div class="themegrid sthemes">${Object.keys(THEMES).filter(f).map(k => { const t = THEMES[k]; return `<button class="themecard ${cur === k ? 'on' : ''}" data-theme="${k}" data-th="${k}">
+        <span class="orn"></span><b>${esc(t.name)}</b><small>${esc(t.desc)}</small>
+        <span class="sw">${t.colors ? t.colors.split('').map(c => `<span class="pip ${c}"></span>`).join('') : t.sw.slice(1, 4).map(c => `<i style="background:${c}"></i>`).join('')}</span></button>`; }).join('')}</div>`).join('')}
+      <div class="toggle" style="margin-top:8px"><div><b>Kartenkunst im Hintergrund</b><div class="small muted" id="artinfo">${(() => { const p = (S.get('artPicks') || {})[cur]; return p ? `${esc(p.name)}${p.artist ? ' · Illus. ' + esc(p.artist) : ''}${p.own ? ' · aus deiner Sammlung' : ''}` : 'Passendes Artwork aus deiner Sammlung'; })()}</div></div>
+        <label class="switch"><input type="checkbox" id="sart" ${S.get('art') ? 'checked' : ''}><span></span></label></div>
+      ${S.get('art') ? '<button class="btn sm block" id="sartnew">Anderes Artwork</button>' : ''}
+      <div class="toggle" style="margin-top:6px"><div><b>Decks in ihren Farben</b><div class="small muted">Ein rotes Deck öffnet im roten Design, zweifarbige mit Schimmer der zweiten Farbe</div></div>
+        <label class="switch"><input type="checkbox" id="sdeckth" ${S.get('deckTheme') ? 'checked' : ''}><span></span></label></div>
+      <div class="toggle"><div><b>Hintergrund-Animationen</b><div class="small muted">Glühwürmchen, Funken, Blasen …</div></div>
+        <label class="switch"><input type="checkbox" id="sfx" ${S.get('fx') ? 'checked' : ''}><span></span></label></div>
+    </div>
     <div class="panel">
       <h2>Kartensprache</h2>
       <p class="small muted">Wie Namen, Texte und Bilder angezeigt werden. Deckbau und Export nutzen intern immer die englischen Namen.</p>
@@ -2700,6 +2717,11 @@ function renderSettings() {
   $('#sbasics').onchange = e => S.set('unlimitedBasics', e.target.checked);
   $$('#slang [data-v]').forEach(b => b.onclick = () => { S.set('cardLang', b.dataset.v); renderSettings(); });
   $$('#sprice [data-v]').forEach(b => b.onclick = () => { S.set('priceSource', b.dataset.v); renderSettings(); });
+  $$('.sthemes [data-th]').forEach(b => b.onclick = async () => { S.set('theme', b.dataset.th); applyDisplay(); $$('.sthemes [data-th]').forEach(x => x.classList.toggle('on', x === b)); await pickArt(b.dataset.th); if (state.view === 'settings') renderSettings(); });
+  $('#sart').onchange = e => { S.set('art', e.target.checked); applyArt(); renderSettings(); };
+  $('#sartnew')?.addEventListener('click', async () => { const k = document.documentElement.dataset.theme; await pickArt(k, true); applyArt(); renderSettings(); });
+  $('#sdeckth').onchange = e => S.set('deckTheme', e.target.checked);
+  $('#sfx').onchange = e => { S.set('fx', e.target.checked); applyDisplay(); };
   $('#sctlb').onchange = e => { S.set('controlsBottom', e.target.checked); applyDisplay(); };
   $('#slist').onclick = () => openListImport(null);
   $('#sprefresh').onclick = async () => {
@@ -2741,7 +2763,7 @@ function renderSettings() {
 /** Kartendaten aus v0.1 enthalten noch keine Sprachfelder → einmalig im Hintergrund neu laden */
 async function upgradeCardCache() {
   if (!navigator.onLine || !state.collection.length) return;
-  const stale = [...state.cards.values()].filter(c => c.lang === undefined || c.prices === undefined || c.leg?.historic === undefined);
+  const stale = [...state.cards.values()].filter(c => c.lang === undefined || c.prices === undefined || c.leg?.historic === undefined || c.artist === undefined);
   if (!stale.length) {
     // Preise wöchentlich still im Hintergrund auffrischen
     if (Date.now() - (+Settings.get('lastCardRefresh') || 0) > 7 * 864e5) {
@@ -2763,7 +2785,118 @@ async function upgradeCardCache() {
   }
 }
 
-function applyDisplay() { document.body.classList.toggle('ctl-bottom', !!Settings.get('controlsBottom')); }
+/* ============================================================
+   Designs
+   ============================================================ */
+const THEMES = {"default": {"name": "Arkanes Gold", "desc": "Das bisherige Design", "colors": "", "fx": [["sparkle", 12]], "art": {"types": ["Angel", "Sphinx", "Dragon"], "q": "t:legendary t:creature"}, "light": false, "sw": ["#0f0c14", "#1d1727", "#d6b26a", "#a8843f", "#ece6f5"]}, "green": {"name": "Pilzwald", "desc": "Wald, Ranken, Pilze, Feen", "colors": "G", "fx": [["fireflies", 14], ["leaves", 8]], "art": {"types": ["Faerie", "Dryad", "Elf", "Treefolk", "Fungus"], "q": "(t:dryad or t:faerie or t:treefolk) c:g"}, "light": false, "sw": ["#0a120c", "#15231a", "#b9d873", "#6f9a3a", "#e9f2e1"]}, "black": {"name": "Grabgesang", "desc": "Black & Death Metal, Zombies", "colors": "B", "fx": [["ash", 18]], "art": {"types": ["Zombie", "Skeleton", "Demon", "Horror", "Vampire"], "q": "(t:zombie or t:skeleton or t:demon) c:b"}, "light": false, "sw": ["#060606", "#141212", "#e3dccb", "#8f1d1d", "#ebe5d8"]}, "red": {"name": "Drachenschmiede", "desc": "Glut, Lava, Funken", "colors": "R", "fx": [["embers", 22]], "art": {"types": ["Dragon", "Elemental", "Phoenix", "Goblin"], "q": "t:dragon c:r"}, "light": false, "sw": ["#130806", "#25110b", "#ff9a4d", "#c2410c", "#fde9dc"]}, "blue": {"name": "Tiefsee", "desc": "Wasser, Magie, Runen", "colors": "U", "fx": [["bubbles", 12], ["sparkle", 8]], "art": {"types": ["Leviathan", "Kraken", "Merfolk", "Sphinx", "Wizard"], "q": "(t:leviathan or t:kraken or t:merfolk) c:u"}, "light": false, "sw": ["#040c16", "#0d1d2f", "#5fcaf7", "#1f7fb8", "#e2f0fb"]}, "white": {"name": "Kathedrale", "desc": "Elfenbein, Gold, Licht", "colors": "W", "fx": [["motes", 16]], "art": {"types": ["Angel", "Cleric", "Pegasus"], "q": "t:angel c:w"}, "light": true, "sw": ["#f5efe1", "#fffcf4", "#a67a22", "#c9a24a", "#2a2317"]}, "wu": {"name": "Himmelsarchiv", "desc": "Azorius · Säulen, Wolken, Gesetzesrunen", "colors": "WU", "fx": [["motes", 10], ["sparkle", 8]], "art": {"types": ["Sphinx", "Spirit", "Bird", "Advisor"], "q": "c=wu t:creature"}, "light": false, "sw": ["#0c1424", "#16233a", "#cfe3ff", "#4d7fc4", "#eef3fb"]}, "ub": {"name": "Versunkene Welt", "desc": "Dimir · Tiefsee-Apokalypse im Film-Blau", "colors": "UB", "fx": [["rain", 26], ["snow", 14]], "art": {"types": ["Horror", "Kraken", "Leviathan", "Faerie", "Rogue", "Zombie"], "q": "c=ub (t:horror or t:kraken or t:faerie or t:zombie)"}, "light": false, "sw": ["#03080a", "#0b171c", "#4ec9c0", "#1b6b73", "#d6ebee"]}, "br": {"name": "Höllenzirkus", "desc": "Rakdos · Ketten, Flammen, Wahnsinn", "colors": "BR", "fx": [["embers", 16], ["ash", 10]], "art": {"types": ["Demon", "Devil", "Vampire", "Ogre"], "q": "c=br t:creature"}, "light": false, "sw": ["#0d0505", "#1e0b0b", "#ff5a3c", "#8f1414", "#f5e3dc"]}, "rg": {"name": "Urgewalt", "desc": "Gruul · Fels, Krallen, Wildnis", "colors": "RG", "fx": [["embers", 10], ["leaves", 6]], "art": {"types": ["Beast", "Dinosaur", "Giant", "Warrior"], "q": "c=rg (t:beast or t:dinosaur or t:giant)"}, "light": false, "sw": ["#120d07", "#241a0f", "#e0862f", "#6c8a2a", "#f4ead9"]}, "gw": {"name": "Weltenbaum", "desc": "Selesnya · Äste, Blüten, Sonnenlicht", "colors": "GW", "fx": [["motes", 12], ["leaves", 8]], "art": {"types": ["Dryad", "Treefolk", "Elf", "Unicorn", "Elemental"], "q": "c=gw t:creature"}, "light": false, "sw": ["#0d140b", "#1a2616", "#e6cf7a", "#7aa03e", "#f3f5e6"]}, "wb": {"name": "Goldene Kathedrale", "desc": "Orzhov · Gotik, Gold, Geister", "colors": "WB", "fx": [["motes", 12], ["sparkle", 6]], "art": {"types": ["Spirit", "Cleric", "Advisor", "Knight"], "q": "c=wb t:creature"}, "light": false, "sw": ["#0c0a08", "#1a1715", "#e3c06a", "#8f7232", "#f2ece2"]}, "ur": {"name": "Blitzlabor", "desc": "Izzet · Blitze, Zahnräder, Experimente", "colors": "UR", "fx": [["sparks", 18]], "art": {"types": ["Weird", "Wizard", "Elemental", "Dragon"], "q": "c=ur t:creature"}, "light": false, "sw": ["#0a0b14", "#161a2a", "#57b8ff", "#d9452b", "#eef0fb"]}, "bg": {"name": "Moderreich", "desc": "Golgari · Pilze, Wurzeln, Sporen", "colors": "BG", "fx": [["spores", 18]], "art": {"types": ["Fungus", "Zombie", "Insect", "Elf", "Plant"], "q": "c=bg (t:fungus or t:zombie or t:insect)"}, "light": false, "sw": ["#0b0d07", "#171b10", "#b7c95a", "#6b4f8a", "#e7ead6"]}, "rw": {"name": "Sonnenlegion", "desc": "Boros · Banner, Sonnenfeuer", "colors": "RW", "fx": [["embers", 10], ["motes", 8]], "art": {"types": ["Soldier", "Angel", "Knight", "Dwarf"], "q": "c=rw t:creature"}, "light": false, "sw": ["#140c08", "#261911", "#ffcf5a", "#c23b22", "#fbefe2"]}, "gu": {"name": "Biolabor", "desc": "Simic · Korallen, Zellen, Mutationen", "colors": "GU", "fx": [["bubbles", 12], ["cells", 6]], "art": {"types": ["Mutant", "Fish", "Frog", "Merfolk", "Kraken"], "q": "c=gu t:creature"}, "light": false, "sw": ["#041211", "#0c2223", "#5fe3b0", "#2a8fb0", "#dff7f1"]}};
+const COLOR_THEME = { W: 'white', U: 'blue', B: 'black', R: 'red', G: 'green' };
+const PAIR_THEME = { WU: 'wu', UB: 'ub', BR: 'br', RG: 'rg', WG: 'gw', WB: 'wb', UR: 'ur', BG: 'bg', WR: 'rw', UG: 'gu' };
+const themeForColors = (cs) => cs.length === 1 ? COLOR_THEME[cs[0]] : cs.length === 2 ? PAIR_THEME[sortColors(cs).join('')] : null;
+const DECK_TINT = { W: 'rgba(255,240,200,.20)', U: 'rgba(60,150,230,.30)', B: 'rgba(150,20,20,.32)', R: 'rgba(255,90,30,.30)', G: 'rgba(80,170,70,.28)' };
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+/** Hintergrund-Partikel für das Design erzeugen: list = [[art, anzahl], …] */
+function spawnFx(list) {
+  const fx = $('#fx'); if (!fx) return;
+  fx.innerHTML = '';
+  if (!Settings.get('fx')) return;
+  const P = {
+    sparkle: () => ({ s: rnd(2, 4), d: rnd(3, 7), dx: 0, dy: 0 }),
+    fireflies: () => ({ s: rnd(3, 5), d: rnd(7, 14), dx: rnd(-60, 60), dy: rnd(-50, 50) }),
+    embers: () => ({ s: rnd(2, 5), d: rnd(6, 13), dx: rnd(-80, 80), dy: 0 }),
+    bubbles: () => ({ s: rnd(6, 16), d: rnd(12, 24), dx: rnd(-40, 40), dy: 0 }),
+    ash: () => ({ s: rnd(2, 5), d: rnd(12, 22), dx: rnd(-90, 90), dy: 0 }),
+    motes: () => ({ s: rnd(2, 4), d: rnd(8, 16), dx: rnd(-40, 40), dy: rnd(-40, 40) }),
+    leaves: () => ({ s: rnd(6, 10), d: rnd(11, 19), dx: rnd(-120, 120), dy: 0 }),
+    rain: () => ({ s: rnd(3, 6), d: rnd(1.1, 2.2), dx: rnd(-40, -10), dy: 0 }),
+    snow: () => ({ s: rnd(1.5, 3), d: rnd(16, 28), dx: rnd(-50, 50), dy: 0 }),
+    spores: () => ({ s: rnd(2, 4), d: rnd(14, 26), dx: rnd(-60, 60), dy: 0 }),
+    sparks: () => ({ s: rnd(2, 3.5), d: rnd(2.5, 5), dx: rnd(-50, 50), dy: rnd(-50, 50) }),
+    cells: () => ({ s: rnd(14, 30), d: rnd(14, 24), dx: rnd(-50, 50), dy: rnd(-50, 50) }),
+  };
+  const out = [];
+  for (const [kind, n] of list || []) {
+    for (let i = 0; i < n; i++) {
+      const v = P[kind] ? P[kind]() : P.sparkle();
+      out.push(`<i class="k-${kind}" style="--x:${rnd(0, 100).toFixed(1)}%;--y:${rnd(5, 95).toFixed(1)}%;--s:${v.s.toFixed(1)}px;--d:${v.d.toFixed(1)}s;--dl:-${rnd(0, v.d).toFixed(1)}s;--dx:${v.dx.toFixed(0)}px;--dy:${v.dy.toFixed(0)}px"></i>`);
+    }
+  }
+  fx.innerHTML = out.join('');
+}
+
+/* Kartenkunst im Hintergrund: passendes Artwork aus der eigenen Sammlung, sonst Zufall von Scryfall */
+const artCrop = (url) => url ? url.replace('/normal/', '/art_crop/').replace('/large/', '/art_crop/') : '';
+function artCandidates(key) {
+  const t = THEMES[key], want = t.colors ? t.colors.split('') : null;
+  const seen = new Set(), out = [];
+  for (const e of physical()) {
+    const c = state.cards.get(e.sid);
+    if (!c || !c.img || seen.has(c.oid) || analyze(c).isLand || analyze(c).excluded) continue;
+    seen.add(c.oid);
+    if (want) {
+      if (want.length === 1 && !(c.colors.length === 1 && c.colors[0] === want[0])) continue;
+      if (want.length === 2 && !(c.colors.length === 2 && want.every(x => c.colors.includes(x)))) continue;
+    } else if (!/Legendary/.test(c.type)) continue;
+    const typeHit = (t.art.types || []).some(ty => (c.type || '').includes(ty));
+    out.push({ c, score: (typeHit ? 2 : 0) + (c.rarity === 'mythic' ? 1 : c.rarity === 'rare' ? .6 : 0) + (c.rank ? 2 - Math.log10(c.rank) / 2.5 : 0) });
+  }
+  return out.sort((a, b) => b.score - a.score).slice(0, 8).map(x => x.c);
+}
+async function pickArt(key, reroll = false) {
+  const picks = Settings.get('artPicks') || {};
+  if (picks[key] && !reroll) return picks[key];
+  const cands = artCandidates(key).filter(c => !reroll || artCrop(c.img) !== picks[key]?.url);
+  let pick = null;
+  if (cands.length && (!reroll || Math.random() < .7)) {
+    const c = cands[Math.floor(Math.random() * cands.length)];
+    pick = { url: artCrop(c.img), name: c.printed && c.lang !== 'en' ? c.printed : c.name, artist: c.artist || '', own: true };
+  } else {
+    try {
+      const r = await fetch(`https://api.scryfall.com/cards/random?q=${encodeURIComponent(THEMES[key].art.q + ' game:paper')}`);
+      if (r.ok) {
+        const c = await r.json();
+        const iu = c.image_uris || c.card_faces?.[0]?.image_uris || {};
+        if (iu.art_crop) pick = { url: iu.art_crop, name: c.name, artist: c.artist || '', own: false };
+      }
+    } catch { /* offline */ }
+  }
+  if (pick) { picks[key] = pick; Settings.set('artPicks', picks); }
+  return pick;
+}
+async function applyArt() {
+  const el = $('#art'); if (!el) return;
+  document.body.classList.toggle('no-art', !Settings.get('art'));
+  if (!Settings.get('art')) return;
+  const key = document.documentElement.dataset.theme;
+  const p = await pickArt(key);
+  if (document.documentElement.dataset.theme !== key) return;
+  el.style.setProperty('--art-img', p ? `url("${p.url}")` : 'none');
+}
+
+window.addEventListener('scroll', () => document.body.classList.toggle('scrolled', window.scrollY > 40), { passive: true });
+
+function applyDisplay() {
+  document.body.classList.toggle('ctl-bottom', !!Settings.get('controlsBottom'));
+  const t = THEMES[Settings.get('theme')] ? Settings.get('theme') : 'default';
+  document.documentElement.dataset.theme = t;
+  document.body.classList.toggle('no-fx', !Settings.get('fx'));
+  spawnFx(THEMES[t].fx);
+  applyArt();
+  const meta = document.querySelector('meta[name=theme-color]');
+  if (meta) meta.content = THEMES[t].sw[0];
+}
+
+/** Deck-Ansicht im Design der Deckfarben (ein- und zweifarbig) + Artwork der stärksten Karte */
+function applyDeckTheme(sheet, deck) {
+  sheet.removeAttribute('data-theme'); sheet.style.removeProperty('--deck2'); sheet.style.removeProperty('--hero');
+  if (!Settings.get('deckTheme')) return null;
+  const key = themeForColors(deck.colors || []);
+  if (key) sheet.dataset.theme = key;
+  const top = deck.cards.map(it => cardById(it.sid)).filter(c => c && c.img && !analyze(c).isLand)
+    .sort((a, b) => (a.rank || 1e6) - (b.rank || 1e6) || (b.rarity === 'mythic') - (a.rarity === 'mythic'))[0];
+  if (top && Settings.get('art')) { sheet.style.setProperty('--hero', `url("${artCrop(top.img)}")`); return top; }
+  return null;
+}
 
 async function init() {
   Settings.load();
