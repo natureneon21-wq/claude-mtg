@@ -1,6 +1,6 @@
 'use strict';
 /* Manaforge – MTG-Sammlung & Deckbau (Prototyp) */
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.3.0';
 
 /* ============================================================
    Hilfsfunktionen
@@ -55,12 +55,12 @@ const DB = {
   db: null,
   open() {
     return new Promise((res, rej) => {
-      const r = indexedDB.open('manaforge', 1);
+      const r = indexedDB.open('manaforge', 2);
       r.onupgradeneeded = () => {
         const d = r.result;
-        d.createObjectStore('collection', { keyPath: 'key' });
-        d.createObjectStore('cards', { keyPath: 'id' });
-        d.createObjectStore('decks', { keyPath: 'id' });
+        for (const [n, k] of [['collection', 'key'], ['cards', 'id'], ['decks', 'id'], ['folders', 'id'], ['loc', 'k']]) {
+          if (!d.objectStoreNames.contains(n)) d.createObjectStore(n, { keyPath: k });
+        }
       };
       r.onsuccess = () => { this.db = r.result; res(); };
       r.onerror = () => rej(r.error);
@@ -87,6 +87,14 @@ const DB = {
       tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error);
     });
   },
+  delMany(store, keys) {
+    return new Promise((res, rej) => {
+      const tx = this.db.transaction(store, 'readwrite');
+      const os = tx.objectStore(store);
+      keys.forEach(k => os.delete(k));
+      tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error);
+    });
+  },
   clear(store) {
     return new Promise((res, rej) => {
       const tx = this.db.transaction(store, 'readwrite');
@@ -97,7 +105,7 @@ const DB = {
 };
 
 const Settings = {
-  defaults: { geminiKey: '', geminiModel: 'gemini-flash-latest', unlimitedBasics: true, limitedMaxCopies: 4 },
+  defaults: { geminiKey: '', geminiModel: 'gemini-flash-latest', unlimitedBasics: true, limitedMaxCopies: 4, cardLang: 'scanned', lastBackup: 0 },
   data: {},
   load() {
     try { this.data = { ...this.defaults, ...JSON.parse(localStorage.getItem('manaforge-settings') || '{}') }; }
@@ -115,8 +123,12 @@ const state = {
   collection: [],          // Einträge aus der CSV (pro Druck/Foil)
   cards: new Map(),        // Scryfall-Daten nach ID
   decks: [],
-  filter: { q: '', colors: [], type: '', sort: 'name', limit: 150 },
-  build: { format: 'casual60', colorMode: 'dual', colors: [], arch: 'auto', forced: '' },
+  folders: [],             // eigene Ordner {id, name, created}
+  loc: new Map(),          // Sprachversionen: "oracleId|lang" → {name,type,text,img,imgBack}
+  tab: 'all',              // Sammlung: all | folders | sets
+  select: null,            // Mehrfachauswahl: Set von Kartennamen oder null
+  filter: { q: '', colors: [], type: '', sort: 'name', limit: 150, folder: null, set: null },
+  build: { format: 'casual60', colorMode: 'dual', colors: [], arch: 'auto', forced: '', folders: [] },
   results: [],
 };
 
@@ -143,6 +155,19 @@ function parseCSV(text) {
   return rows.filter(r => r.some(f => f.trim() !== ''));
 }
 
+const LANG_NORM = { english: 'en', englisch: 'en', german: 'de', deutsch: 'de', french: 'fr', französisch: 'fr', italian: 'it', spanish: 'es', portuguese: 'pt', japanese: 'ja', korean: 'ko', russian: 'ru', 'chinese simplified': 'zhs', 'chinese traditional': 'zht', chinese: 'zhs' };
+function normLang(v) {
+  v = String(v || '').trim().toLowerCase();
+  if (!v) return '';
+  return LANG_NORM[v] || v.slice(0, 3);
+}
+/** Eindeutiger Schlüssel eines Sammlungseintrags: Druck + Foil + Ordner */
+function entryKey(e) {
+  const base = e.sid ? `${e.sid}|${e.foil ? 'f' : 'n'}` : `${(e.name || '').toLowerCase()}|${e.set}|${e.number}|${e.foil ? 'f' : 'n'}`;
+  return base + '|' + (e.folder || '');
+}
+const printKey = (e) => entryKey({ ...e, folder: null });
+
 const COLS = {
   name: ['name', 'cardname', 'card', 'kartenname'],
   set: ['setcode', 'set', 'editioncode', 'edition'],
@@ -153,6 +178,7 @@ const COLS = {
   sid: ['scryfallid', 'scryfall'],
   lang: ['language', 'lang', 'sprache'],
   cond: ['condition', 'zustand'],
+  binder: ['bindername', 'binder', 'folder', 'ordner', 'listname', 'list'],
 };
 
 function parseManaBox(text) {
@@ -178,9 +204,10 @@ function parseManaBox(text) {
     const e = {
       name, sid: /^[0-9a-f-]{36}$/.test(sid) ? sid : '',
       set: set.toLowerCase(), setName: get('setName'), number: get('number'),
-      foil, qty: Number.isFinite(qty) && qty > 0 ? qty : 1, lang: get('lang'), cond: get('cond'),
+      foil, qty: Number.isFinite(qty) && qty > 0 ? qty : 1, lang: normLang(get('lang')), cond: get('cond'),
+      binder: get('binder'), folder: null,
     };
-    e.key = e.sid ? `${e.sid}|${foil ? 'f' : 'n'}` : `${name.toLowerCase()}|${e.set}|${e.number}|${foil ? 'f' : 'n'}`;
+    e.key = entryKey(e) + '|b:' + e.binder.toLowerCase();
     const ex = map.get(e.key);
     if (ex) ex.qty += e.qty; else map.set(e.key, e);
   }
@@ -197,7 +224,10 @@ function slimCard(c) {
   const img = c.image_uris || f0.image_uris || {};
   const leg = {}; LEG_KEYS.forEach(k => leg[k] = c.legalities?.[k] || 'not_legal');
   return {
-    id: c.id, oid: c.oracle_id || f0.oracle_id, name: c.name, printed: c.printed_name || f0.printed_name || '',
+    id: c.id, oid: c.oracle_id || f0.oracle_id, name: c.name, lang: c.lang || 'en',
+    printed: c.printed_name || (faces.length ? faces.map(f => f.printed_name || f.name).join(' // ') : ''),
+    ptype: c.printed_type_line || (faces.length ? faces.map(f => f.printed_type_line || '').filter(Boolean).join(' // ') : ''),
+    ptext: c.printed_text || (faces.length ? faces.map(f => f.printed_text || '').filter(Boolean).join('\n—\n') : ''),
     mana: c.mana_cost ?? f0.mana_cost ?? '', cmc: c.cmc || 0,
     type: c.type_line || faces.map(f => f.type_line).join(' // '),
     frontType: f0.type_line || c.type_line || '',
@@ -423,9 +453,11 @@ const CREATURE_FRAC = { aggro: 0.6, midrange: 0.45, control: 0.22 };
 const bucketOf = (cmc) => Math.max(0, Math.min(5, Math.round(cmc) - 1));
 
 /** Fasst die Sammlung nach Kartennamen zusammen */
-function buildPool() {
+function buildPool(folders = state.build.folders) {
+  const fset = folders && folders.length ? new Set(folders) : null;
   const pool = new Map();
   for (const e of state.collection) {
+    if (fset && !fset.has(e.folder || '_none')) continue;
     const c = e.sid && state.cards.get(e.sid);
     if (!c) continue;
     let p = pool.get(c.name);
@@ -583,7 +615,7 @@ function buildDeck({ format, colors, arch, pool, forced = [] }) {
   return {
     id: uid(), format, colors: sortColors(colors), arch, tribe,
     name: deckName(colors, arch, tribe), cards, missing, warnings,
-    score: Math.round(Math.max(0, Math.min(100, score * 11))), created: Date.now(),
+    score: Math.round(Math.max(0, Math.min(100, score * 11))), raw: score, created: Date.now(),
   };
 }
 
@@ -615,11 +647,11 @@ function suggestDecks({ format, colorMode, colors, arch, forced }) {
     let best = null;
     for (const a of archs) {
       const d = buildDeck({ format, colors: cs, arch: a, pool, forced: forced ? [forced] : [] });
-      if (!best || d.score > best.score) best = d;
+      if (!best || d.raw > best.raw) best = d;
     }
-    if (best) out.push(best);
+    if (best) { best.folders = (state.build.folders || []).slice(); out.push(best); }
   }
-  return out.sort((a, b) => b.score - a.score);
+  return out.sort((a, b) => b.raw - a.raw);
 }
 
 const cardById = (sid) => state.cards.get(sid) || (String(sid).startsWith('basic-') ? basicCard(sid.slice(6)) : null);
@@ -637,7 +669,7 @@ async function geminiCall(prompt, json = true) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
     body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      contents: [{ role: 'user', parts: Array.isArray(prompt) ? prompt : [{ text: prompt }] }],
       generationConfig: { temperature: 0.6, ...(json ? { responseMimeType: 'application/json' } : {}) },
     }),
   });
@@ -701,7 +733,9 @@ Die Summe aller "anzahl" inklusive Länder muss genau ${F.size} ergeben.
 Kartenliste (Anzahl x Name | Kosten | Typ | Text | Stärke):
 ${cands.map(p => cardLine(p, maxC)).join('\n')}`;
   const r = await geminiCall(prompt, true);
-  return validateAIDeck(r, { format, colors, arch: archUse, pool });
+  const deck = validateAIDeck(r, { format, colors, arch: archUse, pool });
+  deck.folders = (state.build.folders || []).slice();
+  return deck;
 }
 
 function validateAIDeck(r, { format, colors, arch, pool }) {
@@ -770,7 +804,7 @@ function validateAIDeck(r, { format, colors, arch, pool }) {
 
 async function geminiAnalyze(deck) {
   const F = FORMATS[deck.format], set = new Set(deck.colors), maxC = maxCopies(F);
-  const pool = buildPool();
+  const pool = buildPool(deck.folders || []);
   const inDeck = new Set(deck.cards.map(c => c.name));
   const list = deck.cards.map(c => { const k = cardById(c.sid); return `${c.n}x ${c.name} | ${k?.mana || '-'} | ${k?.type || ''} | ${shortText(k?.text, 110)}`; }).join('\n');
   const others = [...pool.values()].filter(p => !inDeck.has(p.name) && !p.an.excluded && !p.an.isBasic && (!F.legal || p.card.leg[F.legal] === 'legal') &&
@@ -835,12 +869,199 @@ function imgTag(c, cls = '') {
 }
 
 /* ============================================================
+   Sprache (Wie gescannt / Deutsch / Englisch)
+   ============================================================ */
+const LANG_LABEL = { en: 'EN', de: 'DE', fr: 'FR', it: 'IT', es: 'ES', pt: 'PT', ja: 'JA', ko: 'KO', ru: 'RU', zhs: 'ZH', zht: 'ZH' };
+
+/** Zielsprache für eine Gruppe von Exemplaren (null = so wie der Druck) */
+function targetLang(entries) {
+  const m = Settings.get('cardLang');
+  if (m === 'de' || m === 'en') return m;
+  const e = entries && entries.find(x => x.lang);
+  return e ? e.lang : null;
+}
+
+/** Anzeigedaten einer Karte in der Zielsprache; fehlende Versionen werden im Hintergrund nachgeladen */
+function view(c, lang) {
+  if (!c) return null;
+  const foreign = c.lang && c.lang !== 'en';
+  const own = {
+    name: foreign && c.printed ? c.printed : c.name, type: foreign && c.ptype ? c.ptype : c.type,
+    text: foreign && c.ptext ? c.ptext : c.text, img: c.img, imgBack: c.imgBack, lang: c.lang || 'en',
+  };
+  if (!lang || lang === own.lang || !c.oid) return own;
+  const l = state.loc.get(c.oid + '|' + lang);
+  if (l === undefined) queueLoc(c, lang);
+  if (lang === 'en') {
+    return { name: c.name, type: c.type, text: c.text, img: l?.img || c.img, imgBack: l?.imgBack || c.imgBack, lang: 'en' };
+  }
+  if (!l || l.missing) return own;
+  return { name: l.name || c.name, type: l.type || c.type, text: l.text || c.text, img: l.img || c.img, imgBack: l.imgBack || c.imgBack, lang };
+}
+const displayName = (c, entries, fallback = '') => view(c, targetLang(entries))?.name || c?.name || fallback;
+
+const locQueue = new Map();
+let locTimer = null, locRunning = false;
+function queueLoc(c, lang) {
+  const k = c.oid + '|' + lang;
+  if (state.loc.has(k) || locQueue.has(k)) return;
+  locQueue.set(k, { oid: c.oid, lang });
+  clearTimeout(locTimer); locTimer = setTimeout(runLocQueue, 250);
+}
+function locFromCard(c) {
+  const faces = c.card_faces || [];
+  const img = c.image_uris || faces[0]?.image_uris || {};
+  return {
+    name: c.printed_name || (faces.length ? faces.map(f => f.printed_name || f.name).join(' // ') : c.name),
+    type: c.printed_type_line || (faces.length ? faces.map(f => f.printed_type_line || f.type_line).join(' // ') : c.type_line),
+    text: c.printed_text || (faces.length ? faces.map(f => f.printed_text || f.oracle_text || '').join('\n—\n') : c.oracle_text),
+    img: img.normal || '', imgBack: faces[1]?.image_uris?.normal || '',
+  };
+}
+async function fetchLocBatch(oids, lang) {
+  const q = `lang:${lang} (${oids.map(o => 'oracleid:' + o).join(' or ')})`;
+  let url = `https://api.scryfall.com/cards/search?q=${encodeURIComponent(q)}&unique=cards&include_extras=true`;
+  const out = new Map();
+  let tries = 0;
+  while (url) {
+    const r = await fetch(url);
+    if (r.status === 404) break;                       // keine Treffer in dieser Sprache
+    if (r.status === 429 && tries++ < 3) { await sleep(1500); continue; }
+    if (!r.ok) throw new Error('Scryfall HTTP ' + r.status);
+    const d = await r.json();
+    for (const c of d.data || []) {
+      const oid = c.oracle_id || c.card_faces?.[0]?.oracle_id;
+      if (oid && !out.has(oid)) out.set(oid, locFromCard(c));
+    }
+    url = d.has_more ? d.next_page : null;
+    if (url) await sleep(100);
+  }
+  return out;
+}
+async function runLocQueue() {
+  if (locRunning) return;
+  locRunning = true;
+  try {
+    while (locQueue.size) {
+      const first = locQueue.values().next().value;
+      const batch = [...locQueue.values()].filter(i => i.lang === first.lang).slice(0, 20);
+      batch.forEach(i => locQueue.delete(i.oid + '|' + i.lang));
+      const got = await fetchLocBatch(batch.map(i => i.oid), first.lang);
+      const rows = batch.map(i => ({ k: i.oid + '|' + i.lang, ...(got.get(i.oid) || { missing: true }) }));
+      rows.forEach(r => state.loc.set(r.k, r));
+      await DB.putMany('loc', rows);
+      document.dispatchEvent(new CustomEvent('loc', { detail: new Set(batch.map(i => i.oid)) }));
+      await sleep(110);
+    }
+  } catch (e) {
+    console.warn('Sprachversionen', e);
+    locQueue.clear();                                   // offline o.ä. – später erneut
+  }
+  locRunning = false;
+}
+/** Bilder sichtbarer Kacheln nach dem Nachladen aktualisieren */
+document.addEventListener('loc', (ev) => {
+  $$('.tile[data-oid]').forEach(t => {
+    if (!ev.detail.has(t.dataset.oid)) return;
+    const x = grouped().find(g => g.name === t.dataset.card);
+    const v = x && view(x.card, targetLang(x.entries));
+    const img = t.querySelector('img');
+    if (v && img && v.img && img.getAttribute('src') !== v.img) img.src = v.img;
+  });
+});
+
+/* ============================================================
+   Ordner
+   ============================================================ */
+const folderName = (id) => id ? (state.folders.find(f => f.id === id)?.name || 'Unbekannter Ordner') : 'Ohne Ordner';
+
+async function createFolder(name) {
+  name = name.trim();
+  if (!name) return null;
+  const ex = state.folders.find(f => f.name.toLowerCase() === name.toLowerCase());
+  if (ex) return ex;
+  const f = { id: uid(), name, created: Date.now() };
+  state.folders.push(f);
+  await DB.putMany('folders', [f]);
+  return f;
+}
+
+/** Einträge (ganz oder Teilmenge) in einen Ordner verschieben */
+async function moveEntries(list, folder, qty = null) {
+  const byKey = new Map(state.collection.map(e => [e.key, e]));
+  const removed = [], touched = new Set();
+  for (const e of list) {
+    const n = qty == null ? e.qty : Math.min(qty, e.qty);
+    if (n <= 0) continue;
+    const t = { ...e, folder: folder || null, qty: n };
+    t.key = entryKey(t);
+    if (t.key === e.key) continue;
+    const ex = byKey.get(t.key);
+    if (ex) { ex.qty += n; touched.add(ex); } else { byKey.set(t.key, t); touched.add(t); }
+    e.qty -= n;
+    if (e.qty <= 0) { byKey.delete(e.key); removed.push(e.key); touched.delete(e); } else touched.add(e);
+  }
+  state.collection = [...byKey.values()];
+  state.grouped = null;
+  if (removed.length) await DB.delMany('collection', removed);
+  await DB.putMany('collection', [...touched]);
+}
+
+async function changeQty(entry, d) {
+  entry.qty += d;
+  state.grouped = null;
+  if (entry.qty <= 0) {
+    state.collection = state.collection.filter(e => e !== entry);
+    await DB.del('collection', entry.key);
+  } else await DB.putMany('collection', [entry]);
+}
+
+/** Auswahl-Sheet für einen Ordner. cb(folderId|null) */
+function folderPicker(title, cb, { qtyMax = 0 } = {}) {
+  let qty = qtyMax;
+  const body = openSheet(`<h2>${esc(title)}</h2>
+    ${qtyMax > 1 ? `<div class="row" style="margin:10px 0"><span class="grow muted">Anzahl</span><button class="qbtn" data-qd="-1">−</button><b id="pq" style="width:30px;text-align:center">${qty}</b><button class="qbtn" data-qd="1">+</button></div>` : ''}
+    <div class="row" style="margin:10px 0"><input type="text" id="nf" placeholder="Neuer Ordner, z. B. Avatar" class="grow"><button class="btn sm" id="nfb">Anlegen</button></div>
+    ${state.folders.slice().sort((a, b) => a.name.localeCompare(b.name)).map(f => `<div class="frow" data-pick="${f.id}"><span class="ficon">📁</span><span class="grow">${esc(f.name)}</span></div>`).join('')}
+    <div class="frow" data-pick=""><span class="ficon">🗂</span><span class="grow muted">Ohne Ordner</span></div>`);
+  const done = (id) => { closeSheet(); setTimeout(() => cb(id, qty), 30); };
+  body.querySelectorAll('[data-pick]').forEach(r => r.onclick = () => done(r.dataset.pick || null));
+  body.querySelectorAll('[data-qd]').forEach(b => b.onclick = () => { qty = Math.max(1, Math.min(qtyMax, qty + +b.dataset.qd)); body.querySelector('#pq').textContent = qty; });
+  body.querySelector('#nfb').onclick = async () => { const f = await createFolder(body.querySelector('#nf').value); if (f) done(f.id); };
+  if (title.includes('„')) body.querySelector('#nf').value = title.split('„')[1]?.split('“')[0] || '';
+}
+
+function openFolderMenu(id) {
+  const f = state.folders.find(x => x.id === id);
+  if (!f) return;
+  const n = state.collection.filter(e => e.folder === id).reduce((s, e) => s + e.qty, 0);
+  const body = openSheet(`<h2>Ordner bearbeiten</h2>
+    <label class="field"><span>Name</span><input type="text" id="fn" value="${esc(f.name)}"></label>
+    <button class="btn primary block" id="fsave">Speichern</button>
+    <button class="btn danger block" style="margin-top:10px" id="fdel">Ordner löschen</button>
+    <p class="tiny muted">Die ${n} Karten darin bleiben in deiner Sammlung und landen in „Ohne Ordner“.</p>`);
+  body.querySelector('#fsave').onclick = async () => {
+    const v = body.querySelector('#fn').value.trim(); if (!v) return;
+    f.name = v; await DB.putMany('folders', [f]); closeSheet(); render();
+  };
+  body.querySelector('#fdel').onclick = async (e) => {
+    const b = e.target;
+    if (!b.dataset.armed) { b.dataset.armed = 1; b.textContent = 'Wirklich löschen? Nochmal tippen'; return; }
+    await moveEntries(state.collection.filter(x => x.folder === id), null);
+    state.folders = state.folders.filter(x => x.id !== id);
+    await DB.del('folders', id);
+    state.build.folders = state.build.folders.filter(x => x !== id);
+    if (state.filter.folder === id) state.filter.folder = null;
+    closeSheet(); toast('Ordner gelöscht'); render();
+  };
+}
+
+/* ============================================================
    Sammlung
    ============================================================ */
-function grouped() {
-  if (state.grouped) return state.grouped;
+function groupEntries(entries) {
   const g = new Map();
-  for (const e of state.collection) {
+  for (const e of entries) {
     const c = e.sid && state.cards.get(e.sid);
     const name = c ? c.name : e.name;
     let x = g.get(name);
@@ -848,26 +1069,39 @@ function grouped() {
     x.qty += e.qty; if (e.foil) x.foil += e.qty; x.entries.push(e);
     if ((!x.card || !x.card.img) && c) x.card = c;
   }
-  return (state.grouped = [...g.values()]);
+  return [...g.values()];
+}
+function grouped() { return state.grouped || (state.grouped = groupEntries(state.collection)); }
+
+function scopeEntries() {
+  const f = state.filter;
+  if (f.folder == null && f.set == null) return state.collection;
+  return state.collection.filter(e =>
+    (f.folder == null || (f.folder === '_none' ? !e.folder : e.folder === f.folder)) &&
+    (f.set == null || (state.cards.get(e.sid)?.set || e.set) === f.set));
 }
 
 function filteredCollection() {
   const f = state.filter, q = f.q.trim().toLowerCase();
-  let list = grouped().filter(x => {
+  const base = (f.folder == null && f.set == null) ? grouped() : groupEntries(scopeEntries());
+  const list = base.filter(x => {
     const c = x.card;
-    if (q && !(x.name.toLowerCase().includes(q) || (c?.printed || '').toLowerCase().includes(q) || (c?.type || '').toLowerCase().includes(q))) return false;
+    if (q) {
+      const de = c?.oid ? state.loc.get(c.oid + '|de')?.name : '';
+      const hay = [x.name, c?.printed, de, c?.type, c?.ptype].filter(Boolean).join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
     if (f.colors.length) {
       if (!c) return false;
       const cols = analyze(c).isLand ? c.ci : c.colors;
-      const ok = f.colors.some(fc => fc === 'M' ? cols.length > 1 : fc === 'C' ? cols.length === 0 : cols.includes(fc));
-      if (!ok) return false;
+      if (!f.colors.some(fc => fc === 'M' ? cols.length > 1 : fc === 'C' ? cols.length === 0 : cols.includes(fc))) return false;
     }
-    if (f.type) { if (!c || !new RegExp(f.type).test(c.type)) return false; }
+    if (f.type && (!c || !new RegExp(f.type).test(c.type))) return false;
     return true;
   });
   const price = (x) => parseFloat(x.card?.eur || 0) * x.qty;
   const sorters = {
-    name: (a, b) => a.name.localeCompare(b.name),
+    name: (a, b) => displayName(a.card, a.entries, a.name).localeCompare(displayName(b.card, b.entries, b.name)) || a.name.localeCompare(b.name),
     cmc: (a, b) => (a.card?.cmc ?? 99) - (b.card?.cmc ?? 99) || a.name.localeCompare(b.name),
     qty: (a, b) => b.qty - a.qty || a.name.localeCompare(b.name),
     price: (a, b) => price(b) - price(a),
@@ -875,8 +1109,16 @@ function filteredCollection() {
   return list.sort(sorters[f.sort]);
 }
 
+function backupHint() {
+  const last = +Settings.get('lastBackup') || 0;
+  const hasWork = state.decks.length || state.folders.length;
+  if (!hasWork || Date.now() - last < 14 * 864e5) return '';
+  return `<div class="panel small row" style="border-color:#33405e"><span>💾</span><span class="grow">${last ? 'Letztes Backup vor ' + Math.floor((Date.now() - last) / 864e5) + ' Tagen.' : 'Noch kein Backup deiner Decks und Ordner.'}</span><button class="btn sm" data-act="backup">Sichern</button></div>`;
+}
+
 function renderCollection() {
   const main = $('#main');
+  state.select = null; updateSelectBar();
   if (!state.collection.length) {
     main.innerHTML = `<div class="empty">
       <svg class="art" viewBox="0 0 120 120"><defs><linearGradient id="g1" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f3dfa8"/><stop offset="1" stop-color="#a8843f"/></linearGradient></defs>
@@ -884,28 +1126,95 @@ function renderCollection() {
       <rect x="40" y="24" width="52" height="74" rx="7" fill="#1d1727" stroke="url(#g1)" stroke-width="3" transform="rotate(8 66 61)"/>
       <circle cx="66" cy="60" r="11" fill="none" stroke="url(#g1)" stroke-width="3"/><path d="M66 44v7M66 69v7M50 60h7M75 60h7" stroke="url(#g1)" stroke-width="3" stroke-linecap="round"/></svg>
       <h2>Deine Sammlung ist noch leer</h2>
-      <p>Importiere deinen ManaBox-Export. Danach baut dir Manaforge Decks aus den Karten, die du wirklich besitzt.</p>
-      <button class="btn primary" data-act="import">ManaBox-CSV importieren</button>
+      <p>Scanne deine Karten direkt mit der Kamera, importiere einen ManaBox-Export oder stelle ein Backup wieder her.</p>
+      <div class="row" style="justify-content:center;gap:8px;flex-wrap:wrap"><button class="btn primary" data-act="scan">📷 Karten scannen</button><button class="btn" data-act="import">ManaBox-CSV importieren</button></div>
+      <div style="margin-top:10px"><button class="btn ghost sm" data-act="restore">Backup wiederherstellen</button></div>
       <div class="panel" style="margin-top:22px;text-align:left"><h3 style="margin-bottom:6px">So exportierst du aus ManaBox</h3>
-      <ol class="how small"><li>ManaBox öffnen → <b>Sammlung</b> (oder einen Binder)</li><li>Menü <b>⋮</b> → <b>Exportieren</b> → <b>CSV</b></li><li>Datei speichern oder direkt teilen</li><li>Hier auf „importieren“ tippen und die Datei auswählen</li></ol></div>
+      <ol class="how small"><li>ManaBox öffnen → <b>Sammlung</b> (oder einen Binder)</li><li>Menü <b>⋮</b> → <b>Exportieren</b> → <b>CSV</b></li><li>Datei speichern oder direkt teilen</li><li>Hier auf „importieren“ tippen und die Datei auswählen</li></ol>
+      <p class="tiny muted">Binder aus ManaBox werden automatisch zu Ordnern.</p></div>
     </div>`;
     return;
   }
-  const g = grouped();
-  const total = state.collection.reduce((s, e) => s + e.qty, 0);
-  const value = state.collection.reduce((s, e) => s + (parseFloat(state.cards.get(e.sid)?.eur) || 0) * e.qty, 0);
-  const missing = state.collection.filter(e => !e.sid || !state.cards.has(e.sid)).length;
   const f = state.filter;
+  const tabs = `<div class="seg" id="ctabs" style="margin-top:10px">
+    ${[['all', 'Alle'], ['folders', `Ordner${state.folders.length ? ' · ' + state.folders.length : ''}`], ['sets', 'Sets']].map(([v, l]) => `<button data-tab="${v}" class="${state.tab === v ? 'on' : ''}">${l}</button>`).join('')}</div>`;
+  let content;
+  if (state.tab === 'folders' && f.folder == null) content = folderListHTML();
+  else if (state.tab === 'sets' && f.set == null) content = setListHTML();
+  else content = gridViewHTML();
+  main.innerHTML = backupHint() + tabs + content + `<button class="fab" data-act="scan" aria-label="Karten scannen">📷</button>`;
+  $$('#ctabs button').forEach(b => b.onclick = () => {
+    state.tab = b.dataset.tab; f.folder = null; f.set = null; f.limit = 150; render(); window.scrollTo(0, 0);
+  });
+  if ($('#gridWrap')) wireGrid();
+  $$('[data-folder]').forEach(r => r.addEventListener('click', e => {
+    if (e.target.closest('[data-fmenu]')) { openFolderMenu(e.target.closest('[data-fmenu]').dataset.fmenu); return; }
+    f.folder = r.dataset.folder; f.limit = 150; render(); window.scrollTo(0, 0);
+  }));
+  $$('[data-setcode]').forEach(r => r.onclick = () => { f.set = r.dataset.setcode; f.limit = 150; render(); window.scrollTo(0, 0); });
+  $('#newFolder')?.addEventListener('click', () => {
+    const body = openSheet(`<h2>Neuer Ordner</h2><label class="field"><span>Name</span><input type="text" id="fn" placeholder="z. B. Avatar, Hobbit, Commander-Staples"></label><button class="btn primary block" id="fok">Anlegen</button>`);
+    const inp = body.querySelector('#fn'); setTimeout(() => inp.focus(), 100);
+    body.querySelector('#fok').onclick = async () => { if (await createFolder(inp.value)) { closeSheet(); render(); } };
+  });
+}
+
+function thumbs(entries, n = 3) {
+  const g = groupEntries(entries).filter(x => x.card?.img).sort((a, b) => (a.card.rank || 1e6) - (b.card.rank || 1e6)).slice(0, n);
+  return `<div class="thumbs">${g.map(x => `<img loading="lazy" src="${esc(view(x.card, targetLang(x.entries)).img)}" alt="">`).join('') || '<div class="phm"></div>'}</div>`;
+}
+
+function folderListHTML() {
+  const rows = state.folders.slice().sort((a, b) => a.name.localeCompare(b.name)).map(fo => {
+    const es = state.collection.filter(e => e.folder === fo.id);
+    return `<div class="sugg" data-folder="${fo.id}" style="--stripe:var(--gold)">${thumbs(es)}
+      <div class="grow"><h3>📁 ${esc(fo.name)}</h3><div class="small muted">${es.reduce((s, e) => s + e.qty, 0)} Karten · ${groupEntries(es).length} verschiedene</div></div>
+      <button class="iconbtn" data-fmenu="${fo.id}" aria-label="Ordner bearbeiten">⋯</button></div>`;
+  }).join('');
+  const none = state.collection.filter(e => !e.folder);
+  return `<button class="btn block" id="newFolder" style="margin-top:12px">＋ Neuer Ordner</button>
+    ${rows || '<p class="small muted" style="text-align:center;margin:18px 0">Noch keine eigenen Ordner. Lege z. B. „Avatar“ oder „Hobbit“ an. Unter <b>Sets</b> kannst du ein ganzes Set mit einem Tipp in einen Ordner schieben.</p>'}
+    ${none.length ? `<div class="sugg" data-folder="_none" style="--stripe:var(--line)">${thumbs(none)}<div class="grow"><h3 class="muted">🗂 Ohne Ordner</h3><div class="small muted">${none.reduce((s, e) => s + e.qty, 0)} Karten</div></div></div>` : ''}`;
+}
+
+function setListHTML() {
+  const sets = new Map();
+  for (const e of state.collection) {
+    const c = state.cards.get(e.sid);
+    const code = c?.set || e.set || '?';
+    const s = sets.get(code) || { code, name: c?.setName || e.setName || code.toUpperCase(), qty: 0, names: new Set() };
+    s.qty += e.qty; s.names.add(c?.name || e.name); sets.set(code, s);
+  }
+  const list = [...sets.values()].sort((a, b) => b.qty - a.qty || a.name.localeCompare(b.name));
+  return `<p class="small muted" style="margin:12px 2px 4px">${list.length} Sets in deiner Sammlung</p>
+    ${list.map(s => `<div class="crow" data-setcode="${esc(s.code)}">
+      <img class="seticon" src="https://svgs.scryfall.io/sets/${encodeURIComponent(s.code)}.svg" alt="" onerror="this.style.visibility='hidden'">
+      <span class="nm">${esc(s.name)} <span class="tiny dim">${esc(s.code.toUpperCase())}</span></span>
+      <span class="small muted">${s.names.size} · <b style="color:var(--gold)">${s.qty}</b></span></div>`).join('')}`;
+}
+
+function gridViewHTML() {
+  const f = state.filter;
+  const es = scopeEntries();
+  const total = es.reduce((s, e) => s + e.qty, 0);
+  const value = es.reduce((s, e) => s + (parseFloat(state.cards.get(e.sid)?.eur) || 0) * e.qty, 0);
+  const missing = es.filter(e => !e.sid || !state.cards.has(e.sid)).length;
+  const scopeTitle = f.folder != null ? '📁 ' + esc(f.folder === '_none' ? 'Ohne Ordner' : folderName(f.folder))
+    : f.set != null ? esc(state.cards.get(es[0]?.sid)?.setName || f.set.toUpperCase()) : '';
   const fc = (v, label) => `<button class="fchip ${f.colors.includes(v) ? 'on' : ''}" data-fcolor="${v}">${label}</button>`;
-  main.innerHTML = `
-    <div class="stats">
+  return `
+    ${scopeTitle ? `<div class="scopehead"><button class="iconbtn" id="scopeBack">${ICON.back}</button><h2 class="grow" style="font-size:17px">${scopeTitle}</h2>
+      ${f.folder && f.folder !== '_none' ? `<button class="iconbtn" data-fmenu2="${f.folder}">⋯</button>` : ''}
+      ${f.set != null ? `<button class="btn sm" id="setToFolder">In Ordner …</button>` : ''}</div>` : ''}
+    <div class="stats" style="margin-top:10px">
       <div class="stat"><b>${total}</b><span>Karten</span></div>
-      <div class="stat"><b>${g.length}</b><span>verschiedene</span></div>
+      <div class="stat"><b>${groupEntries(es).length}</b><span>verschiedene</span></div>
       <div class="stat"><b>${value ? Math.round(value) + ' €' : '–'}</b><span>Wert (ca.)</span></div>
     </div>
     ${missing ? `<div class="panel small row"><span class="chip warn">${missing}</span><span class="grow">Einträge ohne Kartendaten. <a href="#" data-act="refetch">Jetzt nachladen</a></span></div>` : ''}
     <div class="toolbar">
       <input type="search" id="q" placeholder="Karte, Typ suchen …" value="${esc(f.q)}" class="grow">
+      <button class="btn sm" id="selBtn">Auswählen</button>
       <button class="btn sm" data-act="import" title="Importieren">＋ CSV</button>
     </div>
     <div class="filters">
@@ -919,6 +1228,10 @@ function renderCollection() {
       </select>
     </div>
     <div id="gridWrap"></div>`;
+}
+
+function wireGrid() {
+  const f = state.filter;
   renderGrid();
   let t;
   $('#q').addEventListener('input', e => { clearTimeout(t); t = setTimeout(() => { f.q = e.target.value; f.limit = 150; renderGrid(); }, 180); });
@@ -929,59 +1242,169 @@ function renderCollection() {
     i >= 0 ? f.colors.splice(i, 1) : f.colors.push(v);
     b.classList.toggle('on'); f.limit = 150; renderGrid();
   }));
+  $('#scopeBack')?.addEventListener('click', () => { f.folder = null; f.set = null; render(); });
+  $('[data-fmenu2]')?.addEventListener('click', e => openFolderMenu(e.currentTarget.dataset.fmenu2));
+  $('#setToFolder')?.addEventListener('click', () => {
+    const es = scopeEntries();
+    const name = state.cards.get(es[0]?.sid)?.setName || f.set.toUpperCase();
+    folderPicker(`Ganzes Set in Ordner verschieben („${name}“)`, async (id) => {
+      const n = es.reduce((s, e) => s + e.qty, 0);
+      await moveEntries(es.slice(), id);
+      toast(`${n} Karten → ${folderName(id)}`);
+      render();
+    });
+  });
+  $('#selBtn').addEventListener('click', () => {
+    state.select = state.select ? null : new Set();
+    $('#selBtn').textContent = state.select ? 'Fertig' : 'Auswählen';
+    renderGrid(); updateSelectBar();
+  });
+}
+
+function tileHTML(x) {
+  const v = x.card ? view(x.card, targetLang(x.entries)) : null;
+  const c = x.card ? { ...x.card, img: v.img, name: v.name } : { name: x.name };
+  const sel = state.select?.has(x.name);
+  return `<div class="tile ${sel ? 'selected' : ''}" data-card="${esc(x.name)}" ${x.card?.oid ? `data-oid="${x.card.oid}"` : ''}>${imgTag(c)}<span class="qty">${x.qty}×</span>${x.foil ? '<span class="foil">FOIL</span>' : ''}${state.select ? `<span class="check">${sel ? '✓' : ''}</span>` : ''}</div>`;
 }
 
 function renderGrid() {
   const list = filteredCollection();
+  state.gridList = list.map(x => x.name);
   const shown = list.slice(0, state.filter.limit);
   $('#gridWrap').innerHTML = `
-    <div class="tiny muted" style="margin-top:8px">${list.length} Treffer</div>
-    <div class="grid">${shown.map(x => `<div class="tile" data-card="${esc(x.name)}">${imgTag(x.card || { name: x.name })}<span class="qty">${x.qty}×</span>${x.foil ? '<span class="foil">FOIL</span>' : ''}</div>`).join('')}</div>
+    <div class="tiny muted" style="margin-top:8px">${list.length} Treffer${state.select ? ' · tippe Karten an, um sie auszuwählen' : ''}</div>
+    <div class="grid">${shown.map(tileHTML).join('')}</div>
     ${list.length > shown.length ? `<button class="btn block" style="margin-top:12px" id="more">Weitere ${Math.min(150, list.length - shown.length)} anzeigen</button>` : ''}`;
   $('#more')?.addEventListener('click', () => { state.filter.limit += 150; renderGrid(); });
 }
 
-/* Kartendetails */
+function updateSelectBar() {
+  let bar = $('#selbar');
+  if (!state.select) { bar && bar.remove(); return; }
+  if (!bar) { bar = document.createElement('div'); bar.id = 'selbar'; bar.className = 'selbar'; document.body.appendChild(bar); }
+  const n = state.select.size;
+  bar.innerHTML = `<span class="grow"><b>${n}</b> ausgewählt</span>
+    <button class="btn sm" id="selAll">Alle</button>
+    <button class="btn sm primary" id="selMove" ${n ? '' : 'disabled'}>In Ordner …</button>`;
+  bar.querySelector('#selAll').onclick = () => { (state.gridList || []).forEach(nm => state.select.add(nm)); renderGrid(); updateSelectBar(); };
+  bar.querySelector('#selMove').onclick = () => {
+    const names = state.select;
+    const es = scopeEntries().filter(e => names.has(state.cards.get(e.sid)?.name || e.name));
+    folderPicker(`${n} Karte(n) verschieben`, async (id) => {
+      const cnt = es.reduce((s, e) => s + e.qty, 0);
+      await moveEntries(es, id);
+      toast(`${cnt} Karten → ${folderName(id)}`);
+      state.select = null; render();
+    });
+  };
+}
+
+/* Kartendetails mit Blättern */
 function decksUsing(name) { return state.decks.filter(d => d.cards.some(c => c.name === name)); }
 
-function openCard(name) {
+function cardDetailHTML(name, idx, total) {
   const x = grouped().find(g => g.name === name);
   const c = x?.card || state.decks.flatMap(d => d.cards).filter(k => k.name === name).map(k => cardById(k.sid)).find(Boolean);
-  if (!c) { toast('Keine Kartendaten vorhanden'); return; }
+  const nav = total > 1 ? `<button class="iconbtn" data-nav="-1" ${idx === 0 ? 'disabled' : ''}>${ICON.back}</button><span class="small muted" style="min-width:64px;text-align:center">${idx + 1} / ${total}</span><button class="iconbtn" data-nav="1" ${idx === total - 1 ? 'disabled' : ''} style="transform:scaleX(-1)">${ICON.back}</button>` : '';
+  const head = `<div class="row" style="margin-bottom:8px">${nav}<span class="grow"></span><button class="iconbtn" data-close>${ICON.close}</button></div>`;
+  if (!c) return head + `<p class="muted" style="text-align:center;padding:40px 0">Keine Kartendaten zu „${esc(name)}“.</p>`;
+  const v = view(c, targetLang(x?.entries));
   const legal = ['standard', 'pioneer', 'modern', 'pauper'].map(k => `<span class="chip ${c.leg?.[k] === 'legal' ? 'good' : 'bad'}">${FORMATS[k].label}</span>`).join(' ');
   const used = decksUsing(name);
-  const body = openSheet(`
-    <div class="row" style="justify-content:flex-end;margin-bottom:6px"><button class="iconbtn" data-close>${ICON.close}</button></div>
-    <div id="cimgWrap">${c.img ? `<img class="cardimg" id="cimg" src="${esc(c.img)}" alt="${esc(c.name)}">` : ''}</div>
-    ${c.imgBack ? '<p class="center tiny muted" style="text-align:center">Tippe aufs Bild zum Umdrehen</p>' : ''}
-    <div class="row" style="margin-top:14px"><h2 class="grow">${esc(c.name)}</h2>${manaHTML(c.mana)}</div>
-    ${c.printed && c.printed !== c.name ? `<div class="muted small">${esc(c.printed)}</div>` : ''}
-    <div class="muted small" style="margin:4px 0 10px">${esc(c.type)}</div>
-    ${c.text ? `<div class="oracle">${esc(c.text)}</div>` : ''}
+  return `${head}
+    <div class="cimgWrap">${v.img ? `<img class="cardimg" id="cimg" src="${esc(v.img)}" alt="${esc(v.name)}">` : `<div class="cardimg ph" style="aspect-ratio:488/680"><span class="t">${esc(v.name)}</span></div>`}</div>
+    <p class="tiny muted" style="text-align:center;margin:6px 0 0">${total > 1 ? 'Wischen zum Blättern' : ''}${total > 1 && v.imgBack ? ' · ' : ''}${v.imgBack ? 'Bild antippen zum Umdrehen' : ''}</p>
+    <div class="row" style="margin-top:12px"><h2 class="grow">${esc(v.name)}</h2>${manaHTML(c.mana)}</div>
+    ${v.name !== c.name ? `<div class="muted small">${esc(c.name)}</div>` : ''}
+    <div class="muted small" style="margin:4px 0 10px">${esc(v.type)}</div>
+    ${v.text ? `<div class="oracle">${esc(v.text)}</div>` : ''}
     <div class="row wrap" style="margin:12px 0">${legal}</div>
     ${x ? `<h3 style="margin:16px 0 6px">Deine Exemplare (${x.qty})</h3>
-      ${x.entries.map(e => { const k = state.cards.get(e.sid); return `<div class="kv small"><span>${esc(k?.setName || e.setName || e.set.toUpperCase())} #${esc(k?.num || e.number)}${e.foil ? ' · <b style="color:#f6a">Foil</b>' : ''}${e.lang ? ' · ' + esc(e.lang) : ''}</span><b>${e.qty}×</b></div>`; }).join('')}` : ''}
+      ${x.entries.map((e, i) => { const k = state.cards.get(e.sid); return `<div class="erow">
+        <div class="grow small"><div>${esc(k?.setName || e.setName || e.set.toUpperCase())} #${esc(k?.num || e.number)}${e.foil ? ' · <b style="color:#f6a">Foil</b>' : ''} <span class="chip" style="padding:1px 6px;font-size:10.5px">${LANG_LABEL[e.lang || k?.lang] || (e.lang || k?.lang || 'EN').toUpperCase()}</span></div>
+        <button class="linkbtn" data-emove="${i}">📁 ${esc(folderName(e.folder))}</button></div>
+        <button class="qbtn" data-eq="${i}" data-d="-1">−</button><b style="width:26px;text-align:center">${e.qty}</b><button class="qbtn" data-eq="${i}" data-d="1">+</button></div>`; }).join('')}` : ''}
     ${used.length ? `<h3 style="margin:16px 0 6px">In Decks</h3>${used.map(d => `<div class="kv small"><span>${esc(d.name)}</span><b>${d.cards.find(k => k.name === name).n}×</b></div>`).join('')}` : ''}
-    ${x && !analyze(c).isLand ? `<button class="btn block primary" style="margin-top:16px" data-around>Deck um diese Karte bauen</button>` : ''}
-  `);
-  body.querySelector('[data-close]').onclick = closeSheet;
-  const img = body.querySelector('#cimg');
-  if (img && c.imgBack) { let back = false; img.onclick = () => { back = !back; img.src = back ? c.imgBack : c.img; }; }
-  body.querySelector('[data-around]')?.addEventListener('click', () => {
-    state.build.forced = c.name; state.build.colorMode = 'all'; state.view = 'build';
-    closeAllSheets();
-    render(); window.scrollTo(0, 0);
+    ${x && !analyze(c).isLand ? `<button class="btn block primary" style="margin-top:16px" data-around>Deck um diese Karte bauen</button>` : ''}`;
+}
+
+function openCard(name, list) {
+  list = list && list.length ? list : [name];
+  let idx = Math.max(0, list.indexOf(name));
+  let edited = false;
+  const onLoc = () => draw();
+  const body = openSheet('', {
+    onClose: () => {
+      document.removeEventListener('loc', onLoc);
+      if (edited && state.view === 'collection') render();
+    },
   });
+  const sheet = body.parentElement;
+  const draw = (dir = 0) => {
+    body.innerHTML = cardDetailHTML(list[idx], idx, list.length);
+    if (dir) { body.classList.remove('slide-l', 'slide-r'); void body.offsetWidth; body.classList.add(dir > 0 ? 'slide-l' : 'slide-r'); }
+    const img = body.querySelector('#cimg');
+    const x = grouped().find(g => g.name === list[idx]);
+    const v = x?.card && view(x.card, targetLang(x.entries));
+    if (img && v?.imgBack) { let back = false; img.onclick = () => { back = !back; img.src = back ? v.imgBack : v.img; }; }
+  };
+  const go = (d) => { const n = idx + d; if (n < 0 || n >= list.length) return; idx = n; draw(d); sheet.scrollTop = 0; };
+  document.addEventListener('loc', onLoc);
+  draw();
+  body.addEventListener('click', async e => {
+    if (e.target.closest('[data-close]')) { closeSheet(); return; }
+    const nv = e.target.closest('[data-nav]');
+    if (nv) { go(+nv.dataset.nav); return; }
+    const x = grouped().find(g => g.name === list[idx]);
+    const q = e.target.closest('[data-eq]');
+    if (q && x) {
+      await changeQty(x.entries[+q.dataset.eq], +q.dataset.d); edited = true; draw(); return;
+    }
+    const mv = e.target.closest('[data-emove]');
+    if (mv && x) {
+      const en = x.entries[+mv.dataset.emove];
+      folderPicker('Exemplar verschieben', async (id, qty) => { await moveEntries([en], id, qty); edited = true; draw(); }, { qtyMax: en.qty });
+      return;
+    }
+    if (e.target.closest('[data-around]')) {
+      state.build.forced = list[idx]; state.build.colorMode = 'all'; state.view = 'build';
+      closeAllSheets(); render(); window.scrollTo(0, 0);
+    }
+  });
+  // Wischgesten
+  let sx = 0, sy = 0, st = 0;
+  sheet.addEventListener('touchstart', e => { const t = e.touches[0]; sx = t.clientX; sy = t.clientY; st = Date.now(); }, { passive: true });
+  sheet.addEventListener('touchend', e => {
+    const t = e.changedTouches[0]; const dx = t.clientX - sx, dy = t.clientY - sy;
+    if (Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy) * 1.6 && Date.now() - st < 700) go(dx < 0 ? 1 : -1);
+  }, { passive: true });
+  sheet.addEventListener('keydown', e => { if (e.key === 'ArrowRight') go(1); if (e.key === 'ArrowLeft') go(-1); });
 }
 
 document.addEventListener('click', e => {
   const t = e.target.closest('[data-card]');
-  if (t) { openCard(t.dataset.card); return; }
+  if (t) {
+    if (state.select) {
+      const n = t.dataset.card;
+      state.select.has(n) ? state.select.delete(n) : state.select.add(n);
+      t.classList.toggle('selected');
+      const ck = t.querySelector('.check'); if (ck) ck.textContent = state.select.has(n) ? '✓' : '';
+      updateSelectBar();
+      return;
+    }
+    openCard(t.dataset.card, state.gridList);
+    return;
+  }
   const a = e.target.closest('[data-act]');
   if (!a) return;
   e.preventDefault();
-  if (a.dataset.act === 'import') $('#csvInput').click();
-  if (a.dataset.act === 'refetch') refetchCards();
+  const act = a.dataset.act;
+  if (act === 'import') $('#csvInput').click();
+  if (act === 'refetch') refetchCards();
+  if (act === 'backup') exportBackup();
+  if (act === 'restore') $('#jsonInput').click();
+  if (act === 'scan') openScanner();
 });
 
 /* ============================================================
@@ -994,51 +1417,668 @@ $('#csvInput').addEventListener('change', async (ev) => {
   try { entries = parseManaBox(await file.text()); }
   catch (e) { toast(e.message, 5000); return; }
   const total = entries.reduce((s, e) => s + e.qty, 0);
+  const binders = new Set(entries.map(e => e.binder).filter(Boolean));
   if (!state.collection.length) return doImport(entries, 'replace');
   const body = openSheet(`<h2>Import</h2>
-    <p class="muted">${entries.length} Einträge mit insgesamt <b>${total}</b> Karten erkannt.</p>
+    <p class="muted">${entries.length} Einträge mit insgesamt <b>${total}</b> Karten erkannt${binders.size ? ` aus ${binders.size} Binder(n) → werden zu Ordnern` : ''}.</p>
     <button class="btn primary block" data-m="replace">Sammlung ersetzen</button>
-    <p class="tiny muted" style="margin:4px 2px 12px">Empfohlen, wenn du deine komplette ManaBox-Sammlung exportiert hast.</p>
+    <p class="tiny muted" style="margin:4px 2px 12px">Empfohlen beim Export der kompletten Sammlung. Deine Ordnerzuordnungen bleiben erhalten.</p>
     <button class="btn block" data-m="merge">Zur Sammlung hinzufügen</button>
     <p class="tiny muted" style="margin:4px 2px">Für einzelne Binder oder Neuzugänge.</p>`);
   body.querySelectorAll('[data-m]').forEach(b => b.onclick = () => { closeSheet(); doImport(entries, b.dataset.m); });
 });
 
+/** Ordnerzuordnung alter Einträge auf neue (ohne Binder) übertragen */
+function preserveFolders(entries, old) {
+  const dist = new Map();
+  for (const e of old) if (e.folder) {
+    const k = printKey(e);
+    if (!dist.has(k)) dist.set(k, []);
+    dist.get(k).push({ folder: e.folder, qty: e.qty });
+  }
+  const out = [];
+  for (const e of entries) {
+    const d = !e.folder && dist.get(printKey(e));
+    if (!d) { out.push(e); continue; }
+    let rest = e.qty;
+    for (const x of d) {
+      const n = Math.min(x.qty, rest);
+      if (n <= 0) continue;
+      out.push({ ...e, folder: x.folder, qty: n }); x.qty -= n; rest -= n;
+    }
+    if (rest > 0) out.push({ ...e, qty: rest });
+  }
+  return out;
+}
+function normalizeCollection(coll) {
+  const m = new Map();
+  for (const e of coll) {
+    e.folder = e.folder || null;
+    e.key = entryKey(e);
+    const x = m.get(e.key);
+    if (x) x.qty += e.qty; else m.set(e.key, e);
+  }
+  return [...m.values()];
+}
+
 async function doImport(entries, mode) {
-  let coll;
-  if (mode === 'merge') {
-    const m = new Map(state.collection.map(e => [e.key, { ...e }]));
-    for (const e of entries) { const x = m.get(e.key); if (x) x.qty += e.qty; else m.set(e.key, e); }
-    coll = [...m.values()];
-  } else coll = entries;
+  // Binder → Ordner
+  const byName = new Map(state.folders.map(f => [f.name.toLowerCase(), f]));
+  const newFolders = [];
+  for (const e of entries) {
+    if (!e.binder) continue;
+    let f = byName.get(e.binder.toLowerCase());
+    if (!f) { f = { id: uid(), name: e.binder, created: Date.now() }; byName.set(e.binder.toLowerCase(), f); newFolders.push(f); }
+    e.folder = f.id;
+  }
+  let coll = mode === 'merge' ? state.collection.map(e => ({ ...e })).concat(entries) : entries;
   overlay(spinnerHTML('Lade Kartendaten von Scryfall …', 'Bei großen Sammlungen kann das etwas dauern.'));
   let notFound = [], offline = false;
   try {
     notFound = await enrichFromScryfall(coll, (d, t, pass) =>
       overlay(spinnerHTML(pass ? 'Zweiter Versuch über Kartennamen …' : 'Lade Kartendaten von Scryfall …', `${d} / ${t}<div class="bar"><i style="width:${Math.round(d / t * 100)}%"></i></div>`)));
   } catch (e) { offline = true; console.warn(e); }
+  if (mode !== 'merge') coll = preserveFolders(coll, state.collection);
+  coll = normalizeCollection(coll);
+  if (newFolders.length) { state.folders.push(...newFolders); await DB.putMany('folders', newFolders); }
   await DB.clear('collection'); await DB.putMany('collection', coll);
   state.collection = coll; state.grouped = null;
   overlay(); state.view = 'collection'; render();
   const total = coll.reduce((s, e) => s + e.qty, 0);
   if (offline) toast('Scryfall nicht erreichbar – Kartendaten später nachladen (Einstellungen).', 6000);
   else if (notFound.length) {
-    const body = openSheet(`<h2>Import fertig</h2><p class="muted">${total} Karten importiert. ${notFound.length} Einträge wurden bei Scryfall nicht gefunden und werden beim Deckbau ignoriert:</p>
+    const body = openSheet(`<h2>Import fertig</h2><p class="muted">${total} Karten importiert${newFolders.length ? `, ${newFolders.length} neue Ordner` : ''}. ${notFound.length} Einträge wurden bei Scryfall nicht gefunden und werden beim Deckbau ignoriert:</p>
       <ul class="list-plain small">${notFound.slice(0, 60).map(e => `<li>${esc(e.name)} <span class="dim">(${esc(e.set.toUpperCase())} ${esc(e.number)})</span></li>`).join('')}</ul>
       <button class="btn block" style="margin-top:14px" data-close>OK</button>`);
     body.querySelector('[data-close]').onclick = closeSheet;
-  } else toast(`Import fertig: ${total} Karten ✓`);
+  } else toast(`Import fertig: ${total} Karten${newFolders.length ? ` · ${newFolders.length} neue Ordner` : ''} ✓`);
 }
 
 async function refetchCards() {
   overlay(spinnerHTML('Lade Kartendaten …'));
   try {
     const nf = await enrichFromScryfall(state.collection, (d, t) => overlay(spinnerHTML('Lade Kartendaten …', `${d} / ${t}`)));
-    await DB.putMany('collection', state.collection);
+    const old = state.collection.map(e => e.key);
+    state.collection = normalizeCollection(state.collection);
+    await DB.delMany('collection', old); await DB.putMany('collection', state.collection);
     state.grouped = null;
     toast(nf.length ? `${nf.length} Einträge weiterhin nicht gefunden` : 'Alle Kartendaten geladen ✓');
   } catch { toast('Scryfall nicht erreichbar.'); }
   overlay(); render();
+}
+
+/* ============================================================
+   Backup
+   ============================================================ */
+function backupData(withKey) {
+  const settings = { ...Settings.data };
+  if (!withKey) delete settings.geminiKey;
+  return {
+    app: 'manaforge', format: 1, version: APP_VERSION, created: new Date().toISOString(),
+    collection: state.collection, folders: state.folders, decks: state.decks, settings,
+  };
+}
+function exportBackup() {
+  const total = state.collection.reduce((s, e) => s + e.qty, 0);
+  const body = openSheet(`<h2>Backup erstellen</h2>
+    <p class="small muted">Sichert Sammlung (${total} Karten), ${state.folders.length} Ordner, ${state.decks.length} Decks und Einstellungen in eine Datei. Kartenbilder und -texte werden beim Wiederherstellen neu von Scryfall geladen.</p>
+    <div class="toggle"><div><b>Gemini-Key mitsichern</b><div class="small muted">Nur aktivieren, wenn du die Datei nicht weitergibst</div></div>
+      <label class="switch"><input type="checkbox" id="bkey"><span></span></label></div>
+    <div class="row" style="margin-top:8px"><button class="btn primary grow" id="bdl">Herunterladen</button>${navigator.canShare ? '<button class="btn grow" id="bsh">Teilen …</button>' : ''}</div>
+    <p class="tiny muted" style="margin-top:8px">„Teilen“ speichert z. B. direkt in Google Drive oder schickt die Datei per Mail.</p>`);
+  const make = () => {
+    const json = JSON.stringify(backupData(body.querySelector('#bkey').checked));
+    const name = `manaforge-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    return { json, name, blob: new Blob([json], { type: 'application/json' }) };
+  };
+  const ok = () => { Settings.set('lastBackup', Date.now()); toast('Backup erstellt ✓'); closeSheet(); if (state.view === 'settings' || state.view === 'collection') setTimeout(render, 60); };
+  body.querySelector('#bdl').onclick = () => {
+    const { blob, name } = make();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    ok();
+  };
+  body.querySelector('#bsh')?.addEventListener('click', async () => {
+    const { blob, name } = make();
+    const file = new File([blob], name, { type: 'application/json' });
+    if (!navigator.canShare({ files: [file] })) { toast('Teilen von Dateien wird hier nicht unterstützt – bitte „Herunterladen“.'); return; }
+    try { await navigator.share({ files: [file], title: 'Manaforge-Backup' }); ok(); }
+    catch (e) { if (e.name !== 'AbortError') toast('Teilen fehlgeschlagen: ' + e.message); }
+  });
+}
+
+$('#jsonInput').addEventListener('change', async (ev) => {
+  const file = ev.target.files[0]; ev.target.value = '';
+  if (!file) return;
+  let data;
+  try { data = JSON.parse(await file.text()); } catch { toast('Die Datei ist kein gültiges Backup.'); return; }
+  if (data?.app !== 'manaforge' || !Array.isArray(data.collection)) { toast('Das ist kein Manaforge-Backup.'); return; }
+  const total = data.collection.reduce((s, e) => s + (e.qty || 0), 0);
+  const body = openSheet(`<h2>Backup wiederherstellen</h2>
+    <p class="muted">Backup vom <b>${new Date(data.created).toLocaleString('de-DE')}</b> (v${esc(data.version)}):<br>${total} Karten · ${(data.folders || []).length} Ordner · ${(data.decks || []).length} Decks</p>
+    <p class="small" style="color:#f0b35a">⚠ Deine aktuelle Sammlung, Ordner und Decks auf diesem Gerät werden ersetzt.</p>
+    <button class="btn primary block" id="rok">Wiederherstellen</button>`);
+  body.querySelector('#rok').onclick = async () => {
+    closeSheet();
+    const coll = normalizeCollection(data.collection.map(e => ({ ...e })));
+    await Promise.all(['collection', 'folders', 'decks'].map(s => DB.clear(s)));
+    await DB.putMany('collection', coll); await DB.putMany('folders', data.folders || []); await DB.putMany('decks', data.decks || []);
+    state.collection = coll; state.folders = data.folders || []; state.decks = (data.decks || []).sort((a, b) => b.created - a.created);
+    state.grouped = null; state.results = []; state.filter.folder = null; state.filter.set = null;
+    const key = Settings.get('geminiKey');
+    Object.entries(data.settings || {}).forEach(([k, v]) => Settings.set(k, v));
+    if (!data.settings?.geminiKey && key) Settings.set('geminiKey', key);
+    if (state.collection.some(e => !e.sid || !state.cards.has(e.sid))) await refetchCards();
+    else render();
+    toast('Backup wiederhergestellt ✓');
+  };
+});
+
+/* ============================================================
+   Scanner (Kamera → Texterkennung auf dem Gerät → Scryfall, Gemini als Fallback)
+   ============================================================ */
+const TESS = {
+  lib: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js',
+  worker: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/worker.min.js',
+  core: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1',
+  lang: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/eng@1.0.0/4.0.0_best_int',
+};
+const CARD_LANG = { EN: 'en', DE: 'de', FR: 'fr', IT: 'it', ES: 'es', SP: 'es', PT: 'pt', JP: 'ja', JA: 'ja', KO: 'ko', KR: 'ko', RU: 'ru', CS: 'zhs', CT: 'zht', PH: 'ph' };
+// Bereiche relativ zur Karte (x0, y0, x1, y1)
+const NAME_BOX = [0.05, 0.03, 0.80, 0.105];
+const INFO_BOX = [0.025, 0.885, 0.66, 0.985];
+const NAME_BOX_TIGHT = [0.06, 0.04, 0.75, 0.10];
+let ocr = null;
+
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    if ([...document.scripts].some(s => s.src === src)) return res();
+    const s = document.createElement('script');
+    s.src = src; s.onload = res; s.onerror = () => rej(new Error('Konnte Texterkennung nicht laden (Internet?)'));
+    document.head.appendChild(s);
+  });
+}
+async function initOCR(onStatus) {
+  if (ocr) return ocr;
+  await loadScript(TESS.lib);
+  const opts = { workerPath: TESS.worker, corePath: TESS.core, langPath: TESS.lang, logger: m => onStatus && onStatus(m) };
+  const [info, name, name2] = await Promise.all([1, 2, 3].map(() => Tesseract.createWorker('eng', 1, opts)));
+  await info.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/•·.*-', tessedit_pageseg_mode: '6' });
+  await name.setParameters({ tessedit_pageseg_mode: '11' });
+  await name2.setParameters({ tessedit_pageseg_mode: '7' });
+  return (ocr = { info, name, name2 });
+}
+
+/* --- Bildverarbeitung --- */
+function subRect(r, b) { return { x: r.x + r.w * b[0], y: r.y + r.h * b[1], w: r.w * (b[2] - b[0]), h: r.h * (b[3] - b[1]) }; }
+/** Ausschnitt vergrößern, in Graustufen, bei dunklem Hintergrund invertieren, Kontrast strecken */
+function prepCrop(src, r, targetH) {
+  const scale = Math.max(1, targetH / r.h);
+  const c = document.createElement('canvas');
+  c.width = Math.round(r.w * scale); c.height = Math.round(r.h * scale);
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.imageSmoothingQuality = 'high';
+  g.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+  const im = g.getImageData(0, 0, c.width, c.height), d = im.data;
+  const hist = new Uint32Array(256); let sum = 0;
+  for (let i = 0; i < d.length; i += 4) { const v = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) | 0; d[i] = v; hist[v]++; sum += v; }
+  const n = d.length / 4, mean = sum / n, inv = mean < 110;
+  let lo = 0, hi = 255, acc = 0;
+  for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > n * 0.02) { lo = v; break; } }
+  acc = 0;
+  for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc > n * 0.02) { hi = v; break; } }
+  const k = 255 / Math.max(20, hi - lo);
+  for (let i = 0; i < d.length; i += 4) {
+    let v = Math.max(0, Math.min(255, (d[i] - lo) * k));
+    if (inv) v = 255 - v;
+    d[i] = d[i + 1] = d[i + 2] = v;
+  }
+  g.putImageData(im, 0, 0);
+  return c;
+}
+/** Tatsächliche Kartenkanten im Bereich um den Rahmen suchen (Kantenprofile) – gleicht ungenaues Halten aus */
+function findCard(src, g) {
+  const pad = 0.14;
+  const sx = Math.max(0, g.x - g.w * pad), sy = Math.max(0, g.y - g.h * pad);
+  const sw = Math.min(src.width - sx, g.w * (1 + 2 * pad)), sh = Math.min(src.height - sy, g.h * (1 + 2 * pad));
+  const W = 240, H = Math.round(W * sh / sw);
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const x2 = c.getContext('2d', { willReadFrequently: true });
+  x2.drawImage(src, sx, sy, sw, sh, 0, 0, W, H);
+  const d = x2.getImageData(0, 0, W, H).data, gr = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) gr[i] = d[i * 4] * 0.3 + d[i * 4 + 1] * 0.59 + d[i * 4 + 2] * 0.11;
+  const col = new Float32Array(W), row = new Float32Array(H);
+  const y0 = Math.round(H * 0.25), y1 = Math.round(H * 0.75), xa = Math.round(W * 0.25), xb = Math.round(W * 0.75);
+  for (let y = y0; y < y1; y++) for (let x = 1; x < W - 1; x++) col[x] += Math.abs(gr[y * W + x + 1] - gr[y * W + x - 1]);
+  for (let y = 1; y < H - 1; y++) for (let x = xa; x < xb; x++) row[y] += Math.abs(gr[(y + 1) * W + x] - gr[(y - 1) * W + x]);
+  const outer = (p, from, to, dir) => {
+    let mx = 0; for (let i = from; i < to; i++) mx = Math.max(mx, p[i]);
+    if (mx <= 0) return null;
+    if (dir > 0) { for (let i = from; i < to; i++) if (p[i] >= mx * 0.55) return i; }
+    else { for (let i = to - 1; i >= from; i--) if (p[i] >= mx * 0.55) return i; }
+    return null;
+  };
+  const l = outer(col, 1, Math.round(W * 0.4), 1), r = outer(col, Math.round(W * 0.6), W - 1, -1);
+  const t = outer(row, 1, Math.round(H * 0.4), 1), b = outer(row, Math.round(H * 0.6), H - 1, -1);
+  if ([l, r, t, b].some(v => v == null)) return g;
+  const k = sw / W;
+  const res = { x: sx + l * k, y: sy + t * k, w: (r - l) * k, h: (b - t) * k };
+  const ar = res.w / res.h, sz = res.h / g.h;
+  return Math.abs(ar - 63 / 88) < 0.07 && sz > 0.7 && sz < 1.25 ? res : g;
+}
+function thumbOf(src, r) {
+  const c = document.createElement('canvas'); c.width = 24; c.height = 34;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.drawImage(src, r.x, r.y, r.w, r.h, 0, 0, 24, 34);
+  const d = g.getImageData(0, 0, 24, 34).data, out = new Float32Array(24 * 34);
+  let m = 0;
+  for (let i = 0; i < out.length; i++) { out[i] = d[i * 4] * 0.3 + d[i * 4 + 1] * 0.59 + d[i * 4 + 2] * 0.11; m += out[i]; }
+  m /= out.length;
+  let v = 0; for (const x of out) v += (x - m) ** 2;
+  out.variance = v / out.length;
+  return out;
+}
+const thumbDiff = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]); return s / a.length; };
+
+/* --- Texte auswerten --- */
+function parseInfo(t) {
+  const T = (t || '').toUpperCase().replace(/[•·*]/g, ' • ');
+  const out = [];
+  const langRx = /([A-Z0-9]{3,5})\s*[•.\-~]?\s*(EN|DE|FR|IT|ES|SP|PT|JP|JA|KO|KR|RU|CS|CT|PH)(?![A-Z])/g;
+  let m;
+  const sets = [];
+  while ((m = langRx.exec(T))) sets.push({ set: m[1].toLowerCase(), lang: CARD_LANG[m[2]] });
+  // Sprachcode unlesbar? Set-Code = erstes Buchstabenwort der Zeile nach der Nummer
+  if (!sets.length) {
+    const lines = T.split('\n').map(l => l.trim()).filter(Boolean);
+    const ni = lines.findIndex(l => /\d{2,}/.test(l));
+    const tok = (lines[ni + 1] || lines[lines.length - 1] || '').match(/[A-Z0-9]{3,6}/);
+    if (tok && /[A-Z].*[A-Z]/.test(tok[0])) { sets.push({ set: tok[0].slice(0, 3).toLowerCase(), lang: null }); if (tok[0].length > 3) sets.push({ set: tok[0].slice(0, 4).toLowerCase(), lang: null }); }
+  }
+  const nums = [];
+  for (const mm of T.matchAll(/(?<![A-Z0-9])(\d{1,8})(?:\s*\/\s*(\d{1,4}))?(?![0-9])/g)) {
+    let raw = mm[1];
+    if (raw.length === 4 && +raw >= 1993 && +raw <= 2035 && !raw.startsWith('0')) continue; // Jahreszahl
+    if (raw.length > 4) { // „/“ nicht erkannt, z. B. 0004281 = 0004/281
+      nums.push({ num: String(+raw.slice(0, 4)), strong: raw.startsWith('0') }, { num: String(+raw.slice(0, 3)), strong: false });
+      continue;
+    }
+    nums.push({ num: String(+raw), strong: !!mm[2] || raw.startsWith('0') });
+  }
+  nums.sort((a, b) => b.strong - a.strong);
+  for (const s of sets.slice(0, 2)) for (const n of nums.slice(0, 2)) out.push({ ...s, ...n });
+  return out.slice(0, 4);
+}
+/** Aus dem Namensbereich die Zeile mit den meisten Buchstaben nehmen */
+const cleanName = (t) => (t || '').split('\n')
+  .map(l => l.replace(/[^A-Za-zÀ-ÿß',\- ]/g, ' ').replace(/\s+/g, ' ').trim())
+  .sort((a, b) => b.replace(/[^A-Za-zÀ-ÿß]/g, '').length - a.replace(/[^A-Za-zÀ-ÿß]/g, '').length)[0] || '';
+const normName = (s) => (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/ß/g, 'ss').replace(/[^a-z]/g, '');
+function lev(a, b) {
+  const m = a.length, n = b.length; if (!m) return n; if (!n) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[n];
+}
+function nameScoreOne(ocrName, card) {
+  const a = normName(ocrName);
+  if (a.length < 3) return 0;
+  const cands = [card.printed_name, card.name, ...(card.card_faces || []).flatMap(f => [f.printed_name, f.name])].filter(Boolean).map(normName);
+  return Math.max(0, ...cands.map(b => {
+    const bb = b.slice(0, Math.max(a.length, Math.min(b.length, a.length + 3)));  // abgeschnittene Namen tolerieren
+    return 1 - lev(a, bb) / Math.max(a.length, bb.length);
+  }));
+}
+
+/* --- Scryfall-Abfragen (mit Cache) --- */
+const scryCache = new Map();
+function scryGet(url) {
+  if (!scryCache.has(url)) scryCache.set(url, fetch(url).then(r => r.ok ? r.json() : null).catch(() => null));
+  return scryCache.get(url);
+}
+async function lookupPrint(set, num, lang) {
+  let c = lang && lang !== 'en' ? await scryGet(`https://api.scryfall.com/cards/${encodeURIComponent(set)}/${encodeURIComponent(num)}/${lang}`) : null;
+  if (!c) c = await scryGet(`https://api.scryfall.com/cards/${encodeURIComponent(set)}/${encodeURIComponent(num)}`);
+  return c && c.object !== 'error' ? c : null;
+}
+async function lookupByName(name, set, lang) {
+  let c = await scryGet(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(name)}${set ? '&set=' + encodeURIComponent(set) : ''}`);
+  if (!c && set) c = await scryGet(`https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(name)}`);
+  if (!c || c.object === 'error') return null;
+  if (lang && lang !== 'en' && c.lang !== lang) c = (await lookupPrint(c.set, c.collector_number, lang)) || c;
+  return c;
+}
+
+/** Ein Erkennungsversuch auf dem Gerät. Ergebnis: {card, sure, how} oder null */
+async function recognizeLocal(cv, r, lockedSet) {
+  const infoC = prepCrop(cv, subRect(r, INFO_BOX), 150);
+  const nameC = prepCrop(cv, subRect(r, NAME_BOX), 72);
+  // Name zweifach lesen (lockerer + enger Ausschnitt, verschiedene Modi) – parallel, robuster gegen Rahmenlinien
+  const nameC2 = prepCrop(cv, subRect(r, NAME_BOX_TIGHT), 72);
+  const [ri, n1, n2] = await Promise.all([ocr.info.recognize(infoC), ocr.name.recognize(nameC), ocr.name2.recognize(nameC2)]);
+  const names = [cleanName(n1.data.text), cleanName(n2.data.text)].filter(t => normName(t).length >= 3);
+  const nameTxt = names.sort((a, b) => normName(b).length - normName(a).length)[0] || '';
+  const nameScore = (_, card) => Math.max(0, ...names.map(t => nameScoreOne(t, card)));
+  let cands = parseInfo(ri.data.text);
+  if (lockedSet) cands = cands.map(c => ({ ...c, set: lockedSet })).concat(cands);
+  const dbg = { info: ri.data.text.trim(), name: nameTxt };
+  let fallback = null;
+  const pref = Settings.get('cardLang') === 'en' ? 'en' : 'de';
+  for (const cd of cands) {
+    const card = await lookupPrint(cd.set, cd.num, cd.lang);
+    if (!card) continue;
+    if (nameScore(nameTxt, card) >= 0.6) return { card, sure: true, how: 'Nummer + Name', dbg };
+    // Sprache unklar oder falsch gelesen: andere Sprachversionen desselben Drucks über den Namen prüfen
+    if (normName(nameTxt).length >= 4) {
+      for (const L of [pref, 'de', 'en', 'fr', 'it', 'es', 'pt'].filter((x, i, a) => a.indexOf(x) === i && x !== cd.lang)) {
+        const c2 = L === 'en' ? await scryGet(`https://api.scryfall.com/cards/${encodeURIComponent(cd.set)}/${encodeURIComponent(cd.num)}`) : await scryGet(`https://api.scryfall.com/cards/${encodeURIComponent(cd.set)}/${encodeURIComponent(cd.num)}/${L}`);
+        if (c2 && c2.object !== 'error' && nameScore(nameTxt, c2) >= 0.6) return { card: c2, sure: true, how: 'Nummer + Name', dbg };
+      }
+    }
+    if (!fallback && cd.lang) fallback = { card, sure: false, how: 'Nummer', dbg };
+  }
+  const lang0 = cands[0]?.lang;
+  if (normName(nameTxt).length >= 4) {
+    const card = await lookupByName(nameTxt, lockedSet || cands[0]?.set, lang0);
+    if (card && nameScore(nameTxt, card) >= 0.6) {
+      const setOk = (lockedSet && card.set === lockedSet) || cands.some(c => c.set === card.set);
+      return { card, sure: setOk, how: setOk ? 'Name + Set' : 'Name', dbg };
+    }
+  }
+  return fallback ? fallback : { card: null, dbg };
+}
+
+async function recognizeGemini(cv, r) {
+  const c = document.createElement('canvas');
+  const s = Math.min(1, 900 / r.h);
+  c.width = Math.round(r.w * s); c.height = Math.round(r.h * s);
+  c.getContext('2d').drawImage(cv, r.x, r.y, r.w, r.h, 0, 0, c.width, c.height);
+  const b64 = c.toDataURL('image/jpeg', 0.85).split(',')[1];
+  const prompt = `Identifiziere diese Magic: The Gathering Karte auf dem Foto. Lies unten links Set-Code, Sammlernummer und Sprachcode, falls vorhanden.
+Antworte NUR mit JSON: {"name":"englischer Kartenname","printed_name":"Name wie aufgedruckt","set":"Set-Code klein","number":"Sammlernummer ohne führende Nullen","lang":"en|de|fr|it|es|pt|ja|ko|ru|zhs|zht","confidence":0.0}
+Wenn keine Karte erkennbar ist: {"name":null}`;
+  const r2 = await geminiCall([{ inline_data: { mime_type: 'image/jpeg', data: b64 } }, { text: prompt }], true);
+  if (!r2?.name) return null;
+  let card = r2.set && r2.number ? await lookupPrint(String(r2.set).toLowerCase(), String(r2.number).replace(/^0+/, ''), r2.lang) : null;
+  if (card && nameScoreOne(r2.name, card) < 0.6 && nameScoreOne(r2.printed_name || '', card) < 0.6) card = null;
+  if (!card) card = await lookupByName(r2.name, r2.set ? String(r2.set).toLowerCase() : null, r2.lang);
+  return card ? { card, sure: (r2.confidence ?? 0.8) >= 0.6, how: 'Gemini' } : null;
+}
+
+/* --- Sammlung ergänzen --- */
+async function addScanned(sc, opts) {
+  const s = slimCard(sc);
+  if (!state.cards.has(s.id)) { state.cards.set(s.id, s); await DB.putMany('cards', [s]); }
+  const e = { name: s.name, sid: s.id, set: s.set, setName: s.setName, number: s.num, foil: !!opts.foil, qty: 1, lang: s.lang, cond: '', binder: '', folder: opts.folder || null };
+  e.key = entryKey(e);
+  const ex = state.collection.find(x => x.key === e.key);
+  if (ex) { ex.qty++; await DB.putMany('collection', [ex]); } else { state.collection.push(e); await DB.putMany('collection', [e]); }
+  state.grouped = null;
+  return e.key;
+}
+async function undoScanned(key) {
+  const e = state.collection.find(x => x.key === key);
+  if (e) await changeQty(e, -1);
+}
+
+/* --- Scanner-Oberfläche --- */
+function openScanner() {
+  if (!navigator.mediaDevices?.getUserMedia) { toast('Kamera wird von diesem Browser nicht unterstützt.'); return; }
+  const S = Settings;
+  const cfg = { folder: S.get('scanFolder') || null, foil: false, lockedSet: S.get('scanSet') || '' };
+  if (cfg.folder && !state.folders.some(f => f.id === cfg.folder)) cfg.folder = null;
+  const session = [];
+  let stream = null, timer = null, busy = false, closed = false, paused = false;
+  let lastUnsure = null, prev = null, stable = 0, armed = true, accepted = null, fails = 0, lastTry = 0, geminiTried = false, pending = null, torch = false;
+
+  const body = openSheet(`
+    <div class="scanwrap" id="scanwrap">
+      <video id="scanvid" playsinline muted autoplay></video>
+      <div class="scanframe" id="scanframe"><i class="nb"></i><i class="ib"></i></div>
+      <div class="scantop">
+        <button class="iconbtn" data-x>${ICON.close}</button>
+        <span class="grow"></span>
+        <button class="iconbtn" id="torch" title="Licht">🔦</button>
+      </div>
+      <div class="scanstatus" id="sstat">Starte Kamera …</div>
+    </div>
+    <div class="scanctl">
+      <button class="fchip on" id="sfolder">📁 ${esc(folderName(cfg.folder))}</button>
+      <button class="fchip ${cfg.foil ? 'on' : ''}" id="sfoil">✨ Foil</button>
+      <button class="fchip ${cfg.lockedSet ? 'on' : ''}" id="sset">Set: ${cfg.lockedSet ? esc(cfg.lockedSet.toUpperCase()) : 'auto'}</button>
+    </div>
+    <div class="row" style="gap:8px;margin:8px 0">
+      <button class="btn grow" id="sshot">Auslösen</button>
+      <button class="btn grow" id="sagain" disabled>+1 Nochmal</button>
+      <button class="btn grow" id="ssearch">Suchen</button>
+    </div>
+    <div id="spending"></div>
+    <div class="row" style="margin-top:6px"><h3 class="grow">Gescannt <span id="scount" class="muted small"></span></h3></div>
+    <div id="slist"><p class="small muted">Halte die Karte gerade und füllend in den Rahmen – die Zeile unten links (Nummer · Set · Sprache) sollte gut lesbar sein.</p></div>`,
+  { full: true, onClose: stop });
+  const video = body.querySelector('#scanvid'), wrap = body.querySelector('#scanwrap'), frameEl = body.querySelector('#scanframe');
+  const stat = (t, cls = '') => { const el = body.querySelector('#sstat'); if (el) { el.textContent = t; el.className = 'scanstatus ' + cls; } };
+  const cv = document.createElement('canvas');
+
+  function stop() {
+    closed = true; clearInterval(timer);
+    stream && stream.getTracks().forEach(t => t.stop());
+    if (state.view === 'collection') render();
+  }
+  /** Rahmen in Videokoordinaten (object-fit: cover beachten) */
+  function guideRect() {
+    const W = wrap.clientWidth, H = wrap.clientHeight, vw = video.videoWidth, vh = video.videoHeight;
+    const gh = Math.min(H * 0.86, W * 0.8 * 88 / 63), gw = gh * 63 / 88;
+    const gx = (W - gw) / 2, gy = (H - gh) / 2;
+    Object.assign(frameEl.style, { left: gx + 'px', top: gy + 'px', width: gw + 'px', height: gh + 'px' });
+    const sc = Math.max(W / vw, H / vh), ox = (W - vw * sc) / 2, oy = (H - vh * sc) / 2;
+    return { x: (gx - ox) / sc, y: (gy - oy) / sc, w: gw / sc, h: gh / sc };
+  }
+  function grab() {
+    if (cv.width !== video.videoWidth) { cv.width = video.videoWidth; cv.height = video.videoHeight; }
+    cv.getContext('2d', { willReadFrequently: true }).drawImage(video, 0, 0);
+    return guideRect();
+  }
+
+  function renderList() {
+    const total = session.reduce((s, x) => s + x.n, 0);
+    body.querySelector('#scount').textContent = total ? `· ${total}` : '';
+    body.querySelector('#sagain').disabled = !session.length;
+    if (!session.length) return;
+    body.querySelector('#slist').innerHTML = session.map((x, i) => `<div class="erow">
+      ${x.img ? `<img src="${esc(x.img)}" alt="" onerror="this.style.visibility='hidden'" style="width:34px;height:47px;border-radius:4px;object-fit:cover">` : ''}
+      <div class="grow small"><b>${esc(x.name)}</b>${x.n > 1 ? ` <span style="color:var(--gold)">×${x.n}</span>` : ''}<div class="tiny muted">${esc(x.set.toUpperCase())} #${esc(x.num)} · ${LANG_LABEL[x.lang] || x.lang.toUpperCase()}${x.foil ? ' · Foil' : ''} · ${esc(x.how)}</div></div>
+      <button class="qbtn" data-undo="${i}" title="Rückgängig">↶</button></div>`).join('');
+  }
+  async function accept(card, how) {
+    const key = await addScanned(card, cfg);
+    const v = view(slimCard(card), card.lang);
+    const last = session[0];
+    if (last && last.key === key) last.n++;
+    else session.unshift({ key, name: v.name, set: card.set, num: card.collector_number, lang: card.lang, foil: cfg.foil, img: v.img, how, n: 1 });
+    navigator.vibrate?.(60);
+    stat(`✓ ${v.name} · ${card.set.toUpperCase()} · ${(LANG_LABEL[card.lang] || card.lang).toUpperCase()}`, 'ok');
+    renderList();
+  }
+  function showPending(card, how) {
+    paused = true;
+    const v = view(slimCard(card), card.lang);
+    navigator.vibrate?.([30, 40, 30]);
+    stat('Bitte bestätigen', 'warn');
+    body.querySelector('#spending').innerHTML = `<div class="ai-box" style="margin:4px 0;display:flex;gap:10px;align-items:center">
+      ${v.img ? `<img src="${esc(v.img)}" style="width:60px;border-radius:6px" alt="">` : ''}
+      <div class="grow small"><b>${esc(v.name)}</b><div class="tiny muted">${esc(card.set_name)} · #${esc(card.collector_number)} · ${(LANG_LABEL[card.lang] || card.lang).toUpperCase()} · erkannt über ${esc(how)}</div>
+      <div class="row" style="gap:6px;margin-top:6px"><button class="btn sm primary" data-pok>Hinzufügen</button><button class="btn sm" data-pprint>Anderer Druck</button><button class="btn sm ghost" data-pno>Verwerfen</button></div></div></div>`;
+    pending = { card, how };
+  }
+  function clearPending() { body.querySelector('#spending').innerHTML = ''; pending = null; paused = false; }
+
+  async function attempt(force = false) {
+    if (busy || closed || paused) return;
+    busy = true;
+    try {
+      const g = grab();
+      const r = findCard(cv, g);
+      window.__scanRect = r;
+      stat('Erkenne …');
+      let res = await recognizeLocal(cv, r, cfg.lockedSet);
+      if (!res.card && fails >= 1 && !geminiTried && Settings.get('geminiKey')) {
+        geminiTried = true; stat('Frage Gemini …');
+        try { res = (await recognizeGemini(cv, r)) || res; } catch (e) { console.warn(e); stat('Gemini: ' + e.message, 'warn'); }
+      }
+      if (closed) return;
+      if (res.card && (res.sure || res.how === 'Gemini')) {
+        await accept(res.card, res.how);
+        armed = false; accepted = thumbOf(cv, g); fails = 0; geminiTried = false; pending = null;
+      } else if (res.card) {
+        // unsicher: zweimal dasselbe Ergebnis = sicher, sonst nachfragen
+        if (lastUnsure === res.card.id) { await accept(res.card, res.how + ' (2×)'); armed = false; accepted = thumbOf(cv, g); fails = 0; lastUnsure = null; }
+        else if (force || fails >= 2) showPending(res.card, res.how);
+        else { lastUnsure = res.card.id; fails++; stat('Fast … Karte ruhig halten'); }
+      } else {
+        fails++;
+        stat(fails >= 3 ? 'Nicht erkannt – Licht/Winkel ändern oder „Suchen“' : 'Karte ruhig und gerade halten …', fails >= 3 ? 'warn' : '');
+      }
+      window.__scanDebug = res.dbg;
+    } catch (e) { console.error(e); stat('Fehler: ' + e.message, 'warn'); }
+    finally { busy = false; lastTry = Date.now(); }
+  }
+
+  function tick() {
+    if (busy || closed || paused || !video.videoWidth) return;
+    const r = grab();
+    const th = thumbOf(cv, r);
+    const d = prev ? thumbDiff(th, prev) : 255;
+    prev = th;
+    if (!armed && accepted && thumbDiff(th, accepted) > 22) { armed = true; fails = 0; geminiTried = false; stat('Bereit'); }
+    stable = d < 7 && th.variance > 250 ? stable + 1 : 0;
+    if (armed && stable >= 2 && Date.now() - lastTry > (fails ? 900 : 150)) attempt();
+  }
+
+  async function start() {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+      if (closed) { stream.getTracks().forEach(t => t.stop()); return; }
+      video.srcObject = stream;
+      await video.play().catch(() => {});
+      guideRect();
+      window.addEventListener('resize', () => !closed && video.videoWidth && guideRect());
+      const track = stream.getVideoTracks()[0];
+      const caps = track.getCapabilities?.() || {};
+      if (caps.focusMode?.includes('continuous')) track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+      if (!caps.torch) body.querySelector('#torch').style.display = 'none';
+    } catch (e) {
+      stat(e.name === 'NotAllowedError' ? 'Kamera-Zugriff verweigert – bitte in Chrome erlauben' : 'Kamera nicht verfügbar: ' + e.message, 'warn');
+      return;
+    }
+    stat('Lade Texterkennung … (einmalig ca. 7 MB)');
+    try {
+      let ready = false;
+      await initOCR(m => { if (!ready && m.status && !/recogniz/.test(m.status) && m.progress != null && m.progress < 1) stat(`Lade Texterkennung … ${Math.round(m.progress * 100)} %`); });
+      ready = true;
+    } catch (e) { stat(e.message, 'warn'); return; }
+    if (closed) return;
+    stat('Halte eine Karte in den Rahmen');
+    timer = setInterval(tick, 220);
+  }
+
+  body.addEventListener('click', async e => {
+    if (e.target.closest('[data-x]')) { closeSheet(); return; }
+    const u = e.target.closest('[data-undo]');
+    if (u) {
+      const x = session[+u.dataset.undo];
+      await undoScanned(x.key); x.n--;
+      if (x.n <= 0) session.splice(+u.dataset.undo, 1);
+      renderList(); if (!session.length) body.querySelector('#slist').innerHTML = '';
+      toast('Rückgängig gemacht'); return;
+    }
+    if (e.target.closest('[data-pok]') && pending) { const p = pending; clearPending(); await accept(p.card, p.how); armed = false; accepted = prev; fails = 0; return; }
+    if (e.target.closest('[data-pno]')) { clearPending(); fails = 0; lastUnsure = null; stat('Verworfen'); return; }
+    if (e.target.closest('[data-pprint]') && pending) { const p = pending; clearPending(); paused = true; pickPrint(p.card.name, async c => { paused = false; if (c) { await accept(c, 'manuell'); armed = false; accepted = prev; } }); return; }
+  });
+  body.querySelector('#torch').onclick = async () => {
+    const t = stream?.getVideoTracks()[0]; if (!t) return;
+    torch = !torch; await t.applyConstraints({ advanced: [{ torch }] }).catch(() => { torch = false; });
+    body.querySelector('#torch').classList.toggle('on', torch);
+  };
+  body.querySelector('#sfoil').onclick = (e) => { cfg.foil = !cfg.foil; e.currentTarget.classList.toggle('on', cfg.foil); };
+  body.querySelector('#sfolder').onclick = () => {
+    paused = true;
+    folderPicker('Gescannte Karten in Ordner', (id) => { cfg.folder = id; S.set('scanFolder', id || ''); body.querySelector('#sfolder').textContent = '📁 ' + folderName(id); paused = false; });
+    sheets[sheets.length - 1].onClose = () => { paused = false; };
+  };
+  body.querySelector('#sset').onclick = () => {
+    paused = true;
+    const sb = openSheet(`<h2>Set festlegen</h2><p class="small muted">Optional, wie „Set sperren“ in ManaBox: Hilft bei schwer lesbaren Karten, wenn du einen Stapel aus einem Set scannst.</p>
+      <label class="field"><span>Set-Code (z. B. MOM, LTR, TLA)</span><input type="text" id="setc" value="${esc(cfg.lockedSet.toUpperCase())}" maxlength="6" style="text-transform:uppercase"></label>
+      <div class="row"><button class="btn primary grow" id="setok">Übernehmen</button><button class="btn grow" id="setauto">Automatisch</button></div>`, { onClose: () => { paused = false; } });
+    const apply = (v) => { cfg.lockedSet = v.trim().toLowerCase(); S.set('scanSet', cfg.lockedSet); const b = body.querySelector('#sset'); b.textContent = 'Set: ' + (cfg.lockedSet ? cfg.lockedSet.toUpperCase() : 'auto'); b.classList.toggle('on', !!cfg.lockedSet); closeSheet(); };
+    sb.querySelector('#setok').onclick = () => apply(sb.querySelector('#setc').value);
+    sb.querySelector('#setauto').onclick = () => apply('');
+  };
+  body.querySelector('#sshot').onclick = () => { armed = true; geminiTried = fails >= 1 ? geminiTried : false; attempt(true); };
+  body.querySelector('#sagain').onclick = async () => {
+    const x = session[0]; if (!x) return;
+    const c = state.cards.get(state.collection.find(e => e.key === x.key)?.sid);
+    if (!c) return;
+    const e = state.collection.find(k => k.key === x.key); e.qty++; await DB.putMany('collection', [e]); state.grouped = null;
+    x.n++; navigator.vibrate?.(40); renderList();
+  };
+  body.querySelector('#ssearch').onclick = () => {
+    paused = true;
+    manualAdd(async c => { paused = false; if (c) await accept(c, 'Suche'); });
+  };
+  start();
+}
+
+/** Karte per Namenssuche wählen, dann Druck + Sprache */
+function manualAdd(cb) {
+  let done = false;
+  const body = openSheet(`<h2>Karte suchen</h2>
+    <input type="search" id="msq" placeholder="Englischer Kartenname …" autocomplete="off">
+    <div id="msres" style="margin-top:8px"></div>`, { onClose: () => { if (!done) cb(null); } });
+  const inp = body.querySelector('#msq'); setTimeout(() => inp.focus(), 150);
+  let t;
+  inp.addEventListener('input', () => {
+    clearTimeout(t);
+    t = setTimeout(async () => {
+      const q = inp.value.trim(); if (q.length < 2) return;
+      const r = await scryGet(`https://api.scryfall.com/cards/autocomplete?q=${encodeURIComponent(q)}`);
+      body.querySelector('#msres').innerHTML = (r?.data || []).slice(0, 12).map(n => `<div class="frow" data-mn="${esc(n)}">${esc(n)}</div>`).join('') || '<p class="small muted">Keine Treffer</p>';
+    }, 250);
+  });
+  body.addEventListener('click', e => {
+    const r = e.target.closest('[data-mn]'); if (!r) return;
+    done = true; closeSheet();
+    setTimeout(() => pickPrint(r.dataset.mn, cb), 60);
+  });
+}
+function pickPrint(name, cb) {
+  let done = false;
+  const body = openSheet(`<h2>${esc(name)}</h2><p class="small muted">Welcher Druck und welche Sprache?</p>
+    <div class="seg" id="pplang" style="margin-bottom:8px">${['en', 'de', 'fr', 'it', 'es', 'ja'].map(l => `<button data-l="${l}" class="${l === (Settings.get('cardLang') === 'de' ? 'de' : 'en') ? 'on' : ''}">${l.toUpperCase()}</button>`).join('')}</div>
+    <div id="pplist"><div class="spinner" style="margin:20px auto"></div></div>`, { onClose: () => { if (!done) cb(null); } });
+  let lang = Settings.get('cardLang') === 'de' ? 'de' : 'en';
+  body.querySelectorAll('[data-l]').forEach(b => b.onclick = () => { lang = b.dataset.l; body.querySelectorAll('[data-l]').forEach(x => x.classList.toggle('on', x === b)); });
+  scryGet(`https://api.scryfall.com/cards/search?q=${encodeURIComponent('!"' + name + '"')}&unique=prints&order=released`).then(r => {
+    const list = r?.data || [];
+    body.querySelector('#pplist').innerHTML = list.slice(0, 60).map((c, i) => {
+      const img = c.image_uris?.small || c.card_faces?.[0]?.image_uris?.small || '';
+      return `<div class="erow" data-pp="${i}" style="cursor:pointer">${img ? `<img src="${esc(img)}" style="width:40px;border-radius:4px" alt="">` : ''}<div class="grow small"><b>${esc(c.set_name)}</b><div class="tiny muted">${esc(c.set.toUpperCase())} #${esc(c.collector_number)} · ${esc(c.released_at || '')}</div></div></div>`;
+    }).join('') || '<p class="small muted">Keine Drucke gefunden.</p>';
+    body.querySelectorAll('[data-pp]').forEach(el => el.onclick = async () => {
+      const c = list[+el.dataset.pp];
+      const card = (await lookupPrint(c.set, c.collector_number, lang)) || c;
+      if (lang !== 'en' && card.lang !== lang) toast(`Keine ${lang.toUpperCase()}-Version dieses Drucks – Englisch übernommen`);
+      done = true; closeSheet(); cb(card);
+    });
+  });
 }
 
 /* ============================================================
@@ -1057,6 +2097,10 @@ function renderBuild() {
     <div class="panel">
       <label class="field"><span>Format</span></label>
       <div class="filters" data-seg="format">${Object.entries(FORMATS).map(([k, F]) => `<button class="fchip ${b.format === k ? 'on' : ''}" data-v="${k}">${F.label}</button>`).join('')}</div>
+      ${state.folders.length ? `<label class="field"><span>Karten aus</span></label>
+      <div class="filters" id="bfolders"><button class="fchip ${b.folders.length ? '' : 'on'}" data-bf="">Ganze Sammlung</button>
+        ${state.folders.map(f => `<button class="fchip ${b.folders.includes(f.id) ? 'on' : ''}" data-bf="${f.id}">📁 ${esc(f.name)}</button>`).join('')}
+        <button class="fchip ${b.folders.includes('_none') ? 'on' : ''}" data-bf="_none">Ohne Ordner</button></div>` : ''}
       <label class="field"><span>Farben</span></label>
       ${seg('colorMode', [['mono', 'Mono'], ['dual', 'Zweifarbig'], ['all', 'Alle'], ['pick', 'Wählen']])}
       <div class="colorpick ${b.colorMode === 'pick' ? '' : 'hidden'}" style="margin-top:12px" id="cpick">
@@ -1086,6 +2130,12 @@ function renderBuild() {
     btn.classList.toggle('on');
   }));
   $('#forced').addEventListener('change', e => { b.forced = e.target.value.trim(); });
+  $$('#bfolders [data-bf]').forEach(btn => btn.addEventListener('click', () => {
+    const id = btn.dataset.bf;
+    if (!id) b.folders = [];
+    else { const i = b.folders.indexOf(id); i >= 0 ? b.folders.splice(i, 1) : b.folders.push(id); }
+    $$('#bfolders [data-bf]').forEach(x => x.classList.toggle('on', x.dataset.bf ? b.folders.includes(x.dataset.bf) : !b.folders.length));
+  }));
   $('#go').addEventListener('click', runSuggest);
   $('#goAI').addEventListener('click', runGemini);
 }
@@ -1201,6 +2251,11 @@ function groupOf(c) {
   if (a.isLand) return 'Länder';
   return GROUPS.find(([, f]) => f(a))[0];
 }
+function deckRowName(name, c) {
+  if (!c || Settings.get('cardLang') === 'en') return name;
+  const x = grouped().find(g => g.name === name);
+  return displayName(c, x?.entries) || name;
+}
 function isSaved(deck) { return state.decks.some(d => d.id === deck.id); }
 
 function usageConflicts(deck) {
@@ -1236,6 +2291,7 @@ function openDeck(deck) {
         <span class="chip">${pipsHTML(deck.colors)}</span><span class="chip">${F.label}</span><span class="chip">${ARCH_DE[deck.arch] || deck.arch}</span>
         ${deck.score != null ? `<span class="chip good">Stärke ${deck.score}</span>` : ''}
         <span class="chip ${st.total === F.size ? 'good' : 'warn'}">${st.total}/${F.size}</span>
+        ${deck.folders?.length ? `<span class="chip">📁 ${deck.folders.map(id => esc(folderName(id === '_none' ? null : id))).join(', ')}</span>` : ''}
       </div>
       ${deck.warnings.map(w => `<div class="chip warn" style="margin-top:8px">⚠ ${esc(w)}</div>`).join(' ')}
       ${deck.missing?.length ? `<div class="small muted" style="margin-top:6px">Fehlt: ${deck.missing.map(m => `${m.n}× ${m.name}`).join(', ')}</div>` : ''}
@@ -1262,7 +2318,7 @@ function openDeck(deck) {
         const items = groups.get(g).sort((a, b) => (a.c?.cmc ?? 0) - (b.c?.cmc ?? 0) || a.it.name.localeCompare(b.it.name));
         return `<div class="group"><h3><span>${g}</span><span class="small muted">${items.reduce((s, x) => s + x.it.n, 0)}</span></h3>
           ${items.map(({ it, c }) => `<div class="crow ${conflicts.has(it.name) ? 'conflict' : ''}" data-cname="${esc(it.name)}">
-            <span class="n">${it.n}</span><span class="nm">${esc(it.name)}${conflicts.has(it.name) ? ' <span class="tiny" style="color:#f0b35a">⚠</span>' : ''}</span>
+            <span class="n">${it.n}</span><span class="nm">${esc(deckRowName(it.name, c))}${conflicts.has(it.name) ? ' <span class="tiny" style="color:#f0b35a">⚠</span>' : ''}</span>
             ${edit ? `<button class="qbtn" data-q="-1">−</button><button class="qbtn" data-q="1">+</button>` : manaHTML(c?.mana)}
           </div>`).join('')}</div>`;
       }).join('')}
@@ -1290,7 +2346,7 @@ function openDeck(deck) {
       draw(); return;
     }
     const row = e.target.closest('[data-cname]');
-    if (row && !edit) { openCard(row.dataset.cname); return; }
+    if (row && !edit) { openCard(row.dataset.cname, $$('[data-cname]', body).map(r => r.dataset.cname)); return; }
     if (e.target.closest('[data-x]')) { closeSheet(); return; }
     if (e.target.closest('[data-edit]')) { edit = !edit; draw(); return; }
     if (e.target.closest('[data-save]')) {
@@ -1404,7 +2460,21 @@ function renderDecks() {
 function renderSettings() {
   const S = Settings;
   const main = $('#main');
+  const lang = S.get('cardLang');
+  const last = +S.get('lastBackup') || 0;
   main.innerHTML = `
+    <div class="panel">
+      <h2>Kartensprache</h2>
+      <p class="small muted">Wie Namen, Texte und Bilder angezeigt werden. Deckbau und Export nutzen intern immer die englischen Namen.</p>
+      <div class="seg" id="slang">${[['scanned', 'Wie gescannt'], ['de', 'Deutsch'], ['en', 'Englisch']].map(([v, l]) => `<button data-v="${v}" class="${lang === v ? 'on' : ''}">${l}</button>`).join('')}</div>
+      <p class="tiny muted" style="margin:8px 2px">${lang === 'scanned' ? 'Jede Karte in der Sprache deines physischen Exemplars (laut ManaBox).' : lang === 'de' ? 'Deutsche Version, wo es eine gibt – sonst Englisch. Wird beim Ansehen nachgeladen.' : 'Immer die englische Originalversion.'}</p>
+      ${lang !== 'en' ? `<button class="btn block" id="sprefetch">Sprachversionen jetzt für alle Karten laden</button>` : ''}
+    </div>
+    <div class="panel">
+      <h2>💾 Backup</h2>
+      <p class="small muted">Sammlung, Ordner, Decks und Einstellungen als Datei sichern, z. B. in Google Drive. Letztes Backup: <b>${last ? new Date(last).toLocaleDateString('de-DE') : 'noch nie'}</b></p>
+      <div class="row"><button class="btn primary grow" data-act="backup">Backup erstellen</button><button class="btn grow" data-act="restore">Wiederherstellen</button></div>
+    </div>
     <div class="panel">
       <h2>✦ Gemini (KI)</h2>
       <p class="small muted">Optional. Hol dir einen kostenlosen API-Key in <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>. Der Key bleibt nur auf diesem Gerät gespeichert.</p>
@@ -1427,7 +2497,9 @@ function renderSettings() {
       <h2>Daten</h2>
       <div class="kv small"><span>Sammlungseinträge</span><b>${state.collection.length}</b></div>
       <div class="kv small"><span>Kartendaten im Cache</span><b>${state.cards.size}</b></div>
+      <div class="kv small"><span>Ordner</span><b>${state.folders.length}</b></div>
       <div class="kv small"><span>Gespeicherte Decks</span><b>${state.decks.length}</b></div>
+      <div class="kv small"><span>Sprachversionen im Cache</span><b>${state.loc.size}</b></div>
       <button class="btn block" style="margin-top:12px" data-act="import">ManaBox-CSV importieren</button>
       <button class="btn block" style="margin-top:8px" id="srefetch">Fehlende Kartendaten nachladen</button>
       <button class="btn block" style="margin-top:8px" id="supdate">Alle Kartendaten aktualisieren</button>
@@ -1455,6 +2527,19 @@ function renderSettings() {
     catch (e) { overlay(); toast('Fehler: ' + e.message, 6000); }
   };
   $('#sbasics').onchange = e => S.set('unlimitedBasics', e.target.checked);
+  $$('#slang [data-v]').forEach(b => b.onclick = () => { S.set('cardLang', b.dataset.v); renderSettings(); });
+  $('#sprefetch')?.addEventListener('click', async () => {
+    const groups = grouped().filter(x => x.card?.oid);
+    groups.forEach(x => view(x.card, targetLang(x.entries)));   // stellt fehlende in die Warteschlange
+    const total = locQueue.size;
+    if (!total) { toast('Alle Sprachversionen sind schon geladen ✓'); return; }
+    overlay(spinnerHTML('Lade Sprachversionen …', `0 / ${total}`));
+    while (locQueue.size || locRunning) {
+      await sleep(400);
+      overlay(spinnerHTML('Lade Sprachversionen …', `${total - locQueue.size} / ${total}<div class="bar"><i style="width:${Math.round((total - locQueue.size) / total * 100)}%"></i></div>`));
+    }
+    overlay(); toast('Sprachversionen geladen ✓'); renderSettings();
+  });
   $('#slim').onchange = e => S.set('limitedMaxCopies', +e.target.value);
   $('#srefetch').onclick = refetchCards;
   $('#supdate').onclick = async () => {
@@ -1473,20 +2558,46 @@ function renderSettings() {
 /* ============================================================
    Start
    ============================================================ */
+/** Kartendaten aus v0.1 enthalten noch keine Sprachfelder → einmalig im Hintergrund neu laden */
+async function upgradeCardCache() {
+  const stale = [...state.cards.values()].filter(c => c.lang === undefined);
+  if (!stale.length || !navigator.onLine) return;
+  toast('Aktualisiere Kartendaten für die Sprachfunktion …', 3000);
+  stale.forEach(c => { state.cards.delete(c.id); anCache.delete(c.id); });
+  try {
+    await enrichFromScryfall(state.collection);
+    state.grouped = null;
+    if (state.view === 'collection' && !sheets.length) render();
+    toast('Kartendaten aktualisiert ✓');
+  } catch (e) {
+    console.warn(e);
+    stale.forEach(c => { if (!state.cards.has(c.id)) state.cards.set(c.id, c); });
+  }
+}
+
 async function init() {
   Settings.load();
   try {
     await DB.open();
-    const [coll, cards, decks] = await Promise.all([DB.all('collection'), DB.all('cards'), DB.all('decks')]);
-    state.collection = coll;
+    const [coll, cards, decks, folders, loc] = await Promise.all(['collection', 'cards', 'decks', 'folders', 'loc'].map(st => DB.all(st)));
     cards.forEach(c => state.cards.set(c.id, c));
+    loc.forEach(l => state.loc.set(l.k, l));
+    state.folders = folders;
+    // Migration v0.1 → v0.2: Schlüssel mit Ordner, Sprache normalisieren
+    const oldKeys = coll.map(e => e.key);
+    coll.forEach(e => { if (e.folder === undefined) e.folder = null; e.lang = normLang(e.lang); });
+    state.collection = normalizeCollection(coll);
+    if (state.collection.some((e, i) => e.key !== oldKeys[i]) || state.collection.length !== coll.length) {
+      await DB.delMany('collection', oldKeys); await DB.putMany('collection', state.collection);
+    }
     state.decks = decks.sort((a, b) => b.created - a.created);
   } catch (e) {
     console.error(e);
     toast('Lokaler Speicher nicht verfügbar – Daten gehen beim Schließen verloren.', 6000);
-    DB.putMany = DB.del = DB.clear = async () => {};
+    DB.putMany = DB.del = DB.delMany = DB.clear = async () => {};
   }
   render();
+  upgradeCardCache();
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW', e));
   }

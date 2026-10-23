@@ -168,6 +168,40 @@ ol.how li{margin:5px 0}
 .list-plain{margin:0;padding-left:18px}
 .kv{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line)}
 .kv:last-child{border:0}
+
+/* v0.2: Ordner, Sets, Auswahl, Kartenansicht */
+.tile.selected{outline:3px solid var(--gold);outline-offset:-3px}
+.tile .check{position:absolute;left:6px;bottom:6px;width:24px;height:24px;border-radius:50%;background:rgba(10,8,14,.8);border:2px solid var(--gold);color:var(--gold);font-weight:800;display:flex;align-items:center;justify-content:center;font-size:14px}
+.tile.selected .check{background:var(--gold);color:#1a1206}
+.selbar{position:fixed;left:8px;right:8px;bottom:calc(var(--nav) + var(--safe-b) + 8px);z-index:40;display:flex;align-items:center;gap:8px;background:#2a2238;border:1px solid var(--gold2);border-radius:14px;padding:8px 10px 8px 14px;box-shadow:0 8px 30px rgba(0,0,0,.5);max-width:880px;margin:0 auto;animation:up .2s}
+.frow{display:flex;align-items:center;gap:10px;padding:12px;background:var(--card);border:1px solid var(--line);border-radius:12px;margin:6px 0;cursor:pointer}
+.ficon{font-size:18px}
+.seticon{width:22px;height:22px;filter:invert(.85) sepia(.3) saturate(2) hue-rotate(5deg);flex:none}
+.erow{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--card);border:1px solid var(--line);border-radius:10px;margin:5px 0}
+.erow .qbtn,.row .qbtn{width:30px;height:30px;border-radius:8px;border:1px solid var(--line);background:var(--bg2);font-weight:800;cursor:pointer;flex:none}
+.linkbtn{background:none;border:0;color:var(--gold);padding:4px 0 0;font-size:12.5px;cursor:pointer;text-align:left}
+.iconbtn:disabled{opacity:.3}
+.slide-l{animation:slidel .18s ease-out}.slide-r{animation:slider .18s ease-out}
+@keyframes slidel{from{transform:translateX(40px);opacity:.3}to{transform:none;opacity:1}}
+@keyframes slider{from{transform:translateX(-40px);opacity:.3}to{transform:none;opacity:1}}
+.sugg .iconbtn{align-self:center;font-size:18px}
+.fab{position:fixed;right:18px;bottom:calc(var(--nav) + var(--safe-b) + 18px);z-index:35;width:60px;height:60px;border-radius:50%;border:1px solid #e2c17c;background:linear-gradient(180deg,#e2c17c,var(--gold2));font-size:26px;box-shadow:0 8px 24px rgba(0,0,0,.55);cursor:pointer}
+body:has(#selbar) .fab{display:none}
+.scanwrap{position:relative;width:100%;height:58vh;min-height:320px;background:#000;border-radius:16px;overflow:hidden;margin-top:4px}
+.scanwrap video{width:100%;height:100%;object-fit:cover;display:block}
+.scanframe{position:absolute;border:3px solid var(--gold);border-radius:14px;box-shadow:0 0 0 2000px rgba(0,0,0,.45);pointer-events:none}
+.scanframe .nb,.scanframe .ib{position:absolute;border:1.5px dashed rgba(243,223,168,.7);border-radius:4px}
+.scanframe .nb{left:5%;top:3%;width:75%;height:7.5%}
+.scanframe .ib{left:2.5%;top:88.5%;width:63.5%;height:10%}
+.scantop{position:absolute;left:10px;right:10px;top:10px;display:flex;gap:8px}
+.scantop .iconbtn{background:rgba(20,15,28,.75)}
+.scantop .iconbtn.on{border-color:var(--gold);background:#3a2e15}
+.scanstatus{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);background:rgba(15,12,20,.85);border:1px solid var(--line);padding:8px 14px;border-radius:999px;font-weight:600;font-size:13.5px;white-space:nowrap;max-width:92%;overflow:hidden;text-overflow:ellipsis}
+.scanstatus.ok{border-color:#24502f;color:var(--ok)}
+.scanstatus.warn{border-color:#5a4520;color:#f0b35a}
+.scanctl{display:flex;gap:6px;overflow-x:auto;margin-top:10px;scrollbar-width:none}
+.scopehead{display:flex;align-items:center;gap:10px;margin-top:12px}
+.scopehead h2{font-size:17px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 </style>
 </head>
 <body>
@@ -188,6 +222,7 @@ ol.how li{margin:5px 0}
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Einstellungen</button>
 </nav>
 <input type="file" id="csvInput" accept=".csv,text/csv,text/comma-separated-values,text/plain,application/vnd.ms-excel,*/*" class="hidden">
+<input type="file" id="jsonInput" accept=".json,application/json,*/*" class="hidden">
 <script src="app.js"></script>
 </body>
 </html>

@@ -1,5 +1,5 @@
 /* Manaforge Service Worker – App offline verfügbar machen */
-const VERSION = 'manaforge-v0.1.0';
+const VERSION = 'manaforge-v0.3.0';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -18,8 +18,8 @@ self.addEventListener('fetch', e => {
     }).catch(() => caches.match(e.request, { ignoreSearch: true }).then(r => r || caches.match('./index.html'))));
     return;
   }
-  // Schriften: Cache zuerst
-  if (/fonts\.(googleapis|gstatic)\.com$/.test(url.hostname)) {
+  // Schriften & Texterkennung (versionierte CDN-Dateien): Cache zuerst
+  if (/fonts\.(googleapis|gstatic)\.com$/.test(url.hostname) || url.hostname === 'cdn.jsdelivr.net') {
     e.respondWith(caches.match(e.request).then(r => r || fetch(e.request).then(res => {
       const copy = res.clone(); caches.open(VERSION + '-fonts').then(c => c.put(e.request, copy)); return res;
     })));
